@@ -106,10 +106,9 @@ impl Chat for LlamaChat<'_> {
 
         let mut sampler = LlamaSampler::greedy();
         let mut out: Vec<u8> = Vec::new();
-        let mut pos = tokens.len() as i32;
         let mut sample_at = batch.n_tokens() - 1;
         let mut step_batch = LlamaBatch::new(1, 1);
-        for _ in 0..max_new {
+        for (pos, _) in (tokens.len() as i32..).zip(0..max_new) {
             let tok = sampler.sample(&self.ctx, sample_at);
             if vocab.is_eog(tok) {
                 break;
@@ -120,7 +119,6 @@ impl Chat for LlamaChat<'_> {
             self.ctx
                 .decode(&mut step_batch)
                 .map_err(|e| anyhow!("decoding: {e}"))?;
-            pos += 1;
             sample_at = 0;
         }
         Ok(String::from_utf8_lossy(&out).into_owned())

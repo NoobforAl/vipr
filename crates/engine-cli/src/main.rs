@@ -165,7 +165,7 @@ fn main() -> Result<()> {
                             "\rdownloading {} / {} ({}%)   ",
                             mb(done),
                             mb(total),
-                            if total > 0 { done * 100 / total } else { 0 }
+                            (done * 100).checked_div(total).unwrap_or(0)
                         );
                         let _ = std::io::stdout().flush();
                     }
@@ -358,7 +358,7 @@ fn main() -> Result<()> {
                 let path = store.fetch(m, token.as_deref(), &mut |done, total| {
                     if done - last >= 8 << 20 || (total > 0 && done == total) {
                         last = done;
-                        let pct = if total > 0 { done * 100 / total } else { 0 };
+                        let pct = (done * 100).checked_div(total).unwrap_or(0);
                         print!("\r{id}: {} / {} ({pct}%)   ", mb(done), mb(total));
                         let _ = std::io::stdout().flush();
                     }

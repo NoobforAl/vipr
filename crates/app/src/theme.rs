@@ -211,7 +211,7 @@ pub fn dialog(t: Tokens) -> impl Fn(&Theme) -> container::Style {
 fn press_dim(c: Color, status: button::Status, t: Tokens) -> Color {
     match status {
         button::Status::Hovered => mix(c, if t.dark { Color::WHITE } else { Color::BLACK }, 0.10),
-        button::Status::Pressed => mix(c, if t.dark { Color::BLACK } else { Color::BLACK }, 0.12),
+        button::Status::Pressed => mix(c, Color::BLACK, 0.12),
         _ => c,
     }
 }

@@ -20,6 +20,7 @@ import json
 import re
 import wave
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,9 +128,7 @@ def windows_for(
             "dur": dur,
             "words": words,
             "wps": words / dur,
-            "switches": sum(
-                1 for a, b in zip(chunk, chunk[1:]) if a.speaker != b.speaker
-            ),
+            "switches": sum(1 for a, b in pairwise(chunk) if a.speaker != b.speaker),
             "short": sum(1 for u in chunk if u.words <= 3),
             "jargon": sum(len(g.findall(low)) for g in glossary),
             "text_edits": kinds.count("TEXT"),
@@ -155,7 +154,7 @@ SCORES = {
 def choose(all_windows: list[dict]) -> list[dict]:
     chosen: list[dict] = []
     used_meetings: dict[str, int] = {}
-    for cat in CATEGORIES:
+    for cat, reason in CATEGORIES.items():
         ranked = sorted(all_windows, key=SCORES[cat], reverse=True)
         pick = None
         for w in ranked:
@@ -189,7 +188,7 @@ def choose(all_windows: list[dict]) -> list[dict]:
             pick = w
             break
         if pick:
-            pick = {**pick, "category": cat, "reason": CATEGORIES[cat]}
+            pick = {**pick, "category": cat, "reason": reason}
             chosen.append(pick)
             used_meetings[pick["meeting"]] = used_meetings.get(pick["meeting"], 0) + 1
     for n, c in enumerate(chosen, 1):
