@@ -113,9 +113,15 @@ const MAX_GAP_IN_UTTERANCE: f64 = 2.0;
 /// An utterance this long (in words) is split at the next sentence end.
 const SOFT_MAX_WORDS: usize = 90;
 
+/// Also knows CJK full stops and the Arabic question mark. The Arabic comma and semicolon (`،` `؛`) are
+/// left out, as `,` and `;` are: they end a clause, not a sentence.
 fn ends_sentence(s: &str) -> bool {
-    s.trim_end_matches(['"', '\'', ')', '\u{201d}'])
-        .ends_with(['.', '?', '!'])
+    s.trim_end_matches([
+        '"', '\'', ')', '\u{201d}', '\u{ff09}', '\u{300d}', '\u{300f}',
+    ])
+    .ends_with([
+        '.', '?', '!', '\u{3002}', '\u{ff01}', '\u{ff1f}', '\u{061f}',
+    ])
 }
 
 /// Speaker whose turn overlaps `[s, e]` most; the nearest turn when none overlaps. `turns` sorted by start.
@@ -348,22 +354,11 @@ impl Transcript {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir).map_err(io_err(dir))?;
-        }
-        let json = serde_json::to_string_pretty(self).map_err(|e| Error::Registry {
-            path: path.display().to_string(),
-            msg: e.to_string(),
-        })?;
-        std::fs::write(path, json).map_err(io_err(path))
+        crate::fsio::save_json(path, self)
     }
 
     pub fn load(path: &Path) -> Result<Transcript> {
-        let text = std::fs::read_to_string(path).map_err(io_err(path))?;
-        serde_json::from_str(&text).map_err(|e| Error::Registry {
-            path: path.display().to_string(),
-            msg: e.to_string(),
-        })
+        crate::fsio::load_json(path)
     }
 
     /// Plain text: `[HH:MM:SS] Name: text`, one line per utterance (same layout as the Python pipeline).
@@ -412,6 +407,30 @@ mod tests {
                     })
                     .collect(),
             }],
+        }
+    }
+
+    #[test]
+    fn sentence_ends_in_other_scripts() {
+        for s in [
+            "done.",
+            "\"done?\"",
+            "(done!)",
+            "\u{5b8c}\u{4e86}\u{3002}",
+            "\u{5b8c}\u{4e86}\u{ff01}",
+            "\u{5b8c}\u{4e86}\u{ff1f}",
+            "\u{300c}\u{5b8c}\u{4e86}\u{3002}\u{300d}",
+            "\u{0686}\u{0631}\u{0627}\u{061f}",
+        ] {
+            assert!(ends_sentence(s), "{s}");
+        }
+        for s in [
+            "done",
+            "done,",
+            "\u{0627}\u{0645}\u{0627}\u{060c}",
+            "\u{0627}\u{0645}\u{0627}\u{061b}",
+        ] {
+            assert!(!ends_sentence(s), "{s}");
         }
     }
 
