@@ -1,14 +1,16 @@
 # ViPr developer commands. Run `make` to list them.
 #
 # Recipes are single plain commands, so they work the same from PowerShell, cmd and Git Bash.
-# Needs: cargo, uv (for ruff). `make workers` / `make package` also need MSVC, CMake and,
+# Needs: cargo, uv (for ruff and taplo). `make workers` / `make package` also need MSVC, CMake and,
 # for BACKEND=cuda, the CUDA toolkit (run `make setup` once for libclang).
 
 # GPU backend for the worker builds: cuda | vulkan | cpu
 BACKEND ?= cuda
 
 PY_DIRS := scripts validation
+TOML_FILES := Cargo.toml .cargo/config.toml scripts/pyproject.toml $(wildcard crates/*/Cargo.toml)
 RUFF := uvx ruff
+TAPLO := uvx taplo
 # cpu is the workers' default build, so it has no feature flag.
 WORKER_FEATURES := $(if $(filter cpu,$(BACKEND)),,--features $(BACKEND))
 
@@ -23,7 +25,7 @@ Run
   make run       Run the app in release mode (slower build, faster app)
 
 Code quality
-  make fix       Apply lint fixes and format all Rust and Python code
+  make fix       Apply lint fixes and format all Rust, Python and TOML files
   make lint      Report format and lint problems, changing nothing
   make test      Run all Rust tests
   make check     lint + test, for use before a commit
@@ -61,20 +63,22 @@ run:
 
 # Clippy goes first because its edits may need reformatting. Python is formatted twice: the first
 # pass settles lints ruff cannot fix by itself (`a; b` on one line), the second tidies ruff's edits.
-# --exit-zero lists what is left to fix by hand without skipping that second pass; `make lint`
-# is the command that fails on those.
+# The last check fails on anything that still has to be fixed by hand.
 fix:
 	cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets
 	cargo fmt --all
+	$(TAPLO) fmt $(TOML_FILES)
 	$(RUFF) format $(PY_DIRS)
-	$(RUFF) check --fix --exit-zero $(PY_DIRS)
+	$(RUFF) check --fix-only $(PY_DIRS)
 	$(RUFF) format $(PY_DIRS)
+	$(RUFF) check $(PY_DIRS)
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets
+	cargo clippy --workspace --all-targets -- -D warnings
 	$(RUFF) format --check $(PY_DIRS)
 	$(RUFF) check $(PY_DIRS)
+	$(TAPLO) fmt --check $(TOML_FILES)
 
 test:
 	cargo test --workspace
