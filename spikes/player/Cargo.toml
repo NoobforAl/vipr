@@ -1,0 +1,24 @@
+[package]
+name = "player-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+default-run = "player-spike"
+
+# own workspace: this spike must not affect the main one
+[workspace]
+
+[dependencies]
+iced = { version = "0.14.0", features = ["svg"] }
+cpal = "0.18"
+rtrb = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+serde_json = "1"
+# only for bin/track_check: same version and features as crates/engine
+symphonia = { version = "0.6.1", features = ["all"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }

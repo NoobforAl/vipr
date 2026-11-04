@@ -1,0 +1,13 @@
+/target/
+/target-*/
+*.mp4
+*.mkv
+*.wav
+*.m4a
+*.log
+*.raw
+/out/
+/stats*.json
+*.png
+/media/
+Cargo.lock.bak
