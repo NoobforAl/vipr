@@ -4,7 +4,10 @@
 //! (PLAN.md, Phase 0 finding 2). The app starts it and reads JSON-lines events from stdout.
 //!
 //!   llm-worker --model Qwen3-4B-Instruct-2507-Q4_K_M.gguf --input utterances.json --out refined.json \
-//!              [--glossary glossary.txt] [--cpu] [--ctx 4096]
+//!              [--glossary glossary.txt] [--cpu] [--ctx 4096] [--mode refine|translate|compare]
+//!
+//! `--mode` defaults to `refine`, described below. The JSON of `translate` and `compare` is defined
+//! in `engine::project`.
 //!
 //! Input JSON:
 //!   {"utterances":[{"id":1,"start":12.3,"speaker":"Speaker 1","text":"..."}],
@@ -24,15 +27,30 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use engine::prompts;
 use llm_worker::llama::{LlamaChat, init_backend, load_model};
 use llm_worker::refine::{DEFAULT_CHUNK_LINES, Input, Refiner};
 use serde_json::json;
 
+/// What the worker does with its input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum Mode {
+    /// Clean up a transcript
+    #[default]
+    Refine,
+    /// Translate subtitle cues
+    Translate,
+    /// Pick the better of two subtitle tracks, row by row
+    Compare,
+}
+
 #[derive(Parser)]
 #[command(about = "Transcript text-cleanup worker (llama.cpp)")]
 struct Args {
+    /// What to do with the input
+    #[arg(long, value_enum, default_value_t)]
+    mode: Mode,
     /// GGUF model file (Qwen3-4B-Instruct-2507 recommended)
     #[arg(long)]
     model: PathBuf,
@@ -93,6 +111,14 @@ fn load_glossary_file(path: &Path) -> Result<Vec<String>> {
 }
 
 fn run(args: &Args) -> Result<()> {
+    match args.mode {
+        Mode::Refine => run_refine(args),
+        Mode::Translate => bail!("--mode translate is not implemented yet"),
+        Mode::Compare => bail!("--mode compare is not implemented yet"),
+    }
+}
+
+fn run_refine(args: &Args) -> Result<()> {
     let started = Instant::now();
     let text = std::fs::read_to_string(&args.input)
         .with_context(|| format!("reading {}", args.input.display()))?;
@@ -157,4 +183,31 @@ fn run(args: &Args) -> Result<()> {
         "elapsed_seconds": started.elapsed().as_secs_f64(),
     }));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(extra: &[&str]) -> Args {
+        let base = ["llm-worker", "--model", "m", "--input", "i", "--out", "o"];
+        Args::parse_from(base.iter().chain(extra))
+    }
+
+    #[test]
+    fn mode_defaults_to_refine() {
+        assert_eq!(args(&[]).mode, Mode::Refine);
+        assert_eq!(args(&["--mode", "refine"]).mode, Mode::Refine);
+    }
+
+    #[test]
+    fn unfinished_modes_say_so_before_touching_any_file() {
+        for (mode, name) in [("translate", "translate"), ("compare", "compare")] {
+            let err = run(&args(&["--mode", mode])).unwrap_err().to_string();
+            assert!(
+                err.contains(name) && err.contains("not implemented"),
+                "{err}"
+            );
+        }
+    }
 }

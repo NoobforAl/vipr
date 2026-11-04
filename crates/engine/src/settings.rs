@@ -1,12 +1,12 @@
 //! User settings saved between runs (`settings.json` in the per-user config folder).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::Result;
 use crate::registry::Role;
-use crate::{Error, Result, io_err};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
@@ -28,6 +28,9 @@ pub struct Settings {
     /// Number of speakers: 0 = detect automatically (default), otherwise force this many.
     #[serde(default)]
     pub num_speakers: usize,
+    /// Id of the profile used for new runs (see `profiles.rs`). `None` = no profile.
+    #[serde(default)]
+    pub active_profile: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -46,6 +49,7 @@ impl Default for Settings {
             theme: default_theme(),
             cleanup: true,
             num_speakers: 0,
+            active_profile: None,
         }
     }
 }
@@ -76,16 +80,13 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Atomic, so a crash while saving cannot leave a half-written file that resets all settings.
     pub fn save(&self) -> Result<()> {
-        let path = Self::path();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(io_err(dir))?;
-        }
-        let json = serde_json::to_string_pretty(self).map_err(|e| Error::Registry {
-            path: path.display().to_string(),
-            msg: e.to_string(),
-        })?;
-        std::fs::write(&path, json).map_err(io_err(&path))
+        self.save_to(&Self::path())
+    }
+
+    fn save_to(&self, path: &Path) -> Result<()> {
+        crate::fsio::save_json(path, self)
     }
 }
 
@@ -108,5 +109,29 @@ mod tests {
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
         );
+    }
+
+    #[test]
+    fn older_files_load_without_an_active_profile() {
+        let old = r#"{"theme":"dark","cleanup":false,"num_speakers":2}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.active_profile, None);
+        assert_eq!(s.theme, "dark");
+    }
+
+    #[test]
+    fn save_writes_the_whole_file_and_replaces_the_old_one() {
+        let dir = std::env::temp_dir().join(format!("vipr-settings-{}", std::process::id()));
+        let path = dir.join("nested").join("settings.json");
+        let mut s = Settings {
+            active_profile: Some("p1".into()),
+            ..Settings::default()
+        };
+        s.save_to(&path).unwrap();
+        s.theme = "light".into();
+        s.save_to(&path).unwrap();
+        let back: Settings = crate::fsio::load_json(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(back, s);
     }
 }

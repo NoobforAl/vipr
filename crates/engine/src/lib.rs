@@ -4,14 +4,24 @@
 //! refine, translate and export stages are added in later phases (see PLAN.md).
 
 pub mod audio;
+pub mod compare;
 pub mod diar;
 pub mod download;
+pub mod fsio;
+pub mod lang;
+pub mod marks;
+pub mod profiles;
+pub mod project;
 pub mod prompts;
 pub mod registry;
+pub mod sanitize;
 pub mod settings;
+pub mod subalign;
+pub mod subparse;
 pub mod subtitles;
 pub mod tools;
 pub mod transcript;
+pub mod translate;
 
 /// Folder name under the per-user data / config dirs (`%LOCALAPPDATA%\ViPr`, ...).
 pub const APP_DIR_NAME: &str = "ViPr";
@@ -27,6 +37,8 @@ pub enum Error {
     },
     #[error("invalid registry {path}: {msg}")]
     Registry { path: String, msg: String },
+    #[error("invalid data in {path}: {msg}")]
+    Json { path: String, msg: String },
     #[error("audio: {0}")]
     Audio(String),
     #[error("unknown model id '{0}'")]

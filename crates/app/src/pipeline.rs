@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use engine::project::ProjectPaths;
 use engine::subtitles::{SubtitleOptions, build_cues, to_srt, to_vtt};
 use engine::transcript::{AsrResult, SpeakerTurn, Transcript};
 use serde_json::{Value, json};
@@ -55,6 +56,8 @@ pub enum Event {
     Done {
         transcript: Box<Transcript>,
         outputs: Vec<PathBuf>,
+        /// Where the results went, with the real stem (see [`result_stem`]).
+        paths: ProjectPaths,
     },
     Failed(String),
 }
@@ -254,6 +257,37 @@ fn pct_of(v: &Value) -> f32 {
     v.get("percent").and_then(Value::as_f64).unwrap_or(0.0) as f32 / 100.0
 }
 
+/// Progress over the whole run, 0..1: the steps before `step` are finished, and `step` itself is
+/// `fraction` done. `steps` holds each step's name and weight.
+fn overall_progress(steps: &[(&str, f32)], step: usize, fraction: f32) -> f32 {
+    let total: f32 = steps.iter().map(|s| s.1).sum();
+    let finished: f32 = steps.iter().take(step).map(|s| s.1).sum();
+    let current = steps.get(step).map_or(0.0, |s| s.1);
+    (finished + current * fraction.clamp(0.0, 1.0)) / total
+}
+
+/// Name of a recording's results. `earlier_source` is the file that already has results under the
+/// plain name, if any: meeting.mp4 and meeting.mp3 must not overwrite each other's results, so the
+/// second one gets "meeting (mp3)".
+fn result_stem(path: &Path, earlier_source: Option<&str>) -> String {
+    let stem = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "recording".into());
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if earlier_source.is_some_and(|s| s != file_name) {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return format!("{stem} ({ext})");
+    }
+    stem
+}
+
 /// Run the whole job. Blocking; call from a worker thread.
 pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> {
     let file_name = input
@@ -261,25 +295,21 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut stem = input
+    let plain_stem = input
         .path
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "recording".into());
-    // meeting.mp4 and meeting.mp3 must not overwrite each other's results: the second one gets "meeting (mp3)"
-    let earlier_source =
-        std::fs::read_to_string(input.out_dir.join(&stem).join(format!("{stem}.json")))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|v| v.get("source").and_then(Value::as_str).map(str::to_string));
-    if earlier_source.is_some_and(|s| s != file_name) {
-        let ext = input
-            .path
-            .extension()
-            .map(|e| e.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        stem = format!("{stem} ({ext})");
-    }
+    let earlier_source = std::fs::read_to_string(
+        input
+            .out_dir
+            .join(&plain_stem)
+            .join(format!("{plain_stem}.json")),
+    )
+    .ok()
+    .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    .and_then(|v| v.get("source").and_then(Value::as_str).map(str::to_string));
+    let stem = result_stem(&input.path, earlier_source.as_deref());
     let dir = input.out_dir.join(&stem);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
@@ -303,10 +333,8 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
         steps.push(("Cleaning up the text", 0.25));
     }
     steps.push(("Saving files", 0.05));
-    let total: f32 = steps.iter().map(|s| s.1).sum();
     emit(Event::Plan(steps.iter().map(|s| s.0.to_string()).collect()));
     let mut step = 0usize;
-    let mut base = 0.0f32;
 
     // 1. speech to text
     emit(Event::Step(step));
@@ -327,7 +355,6 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
     if let Some(g) = &input.glossary {
         args.extend(["--glossary".into(), s(g)]);
     }
-    let w = steps[step].1;
     run_worker(
         &asr_exe,
         &args,
@@ -353,13 +380,12 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
             }
             Some("progress") => emit(Event::Progress {
                 step: pct_of(v),
-                overall: (base + w * pct_of(v)) / total,
+                overall: overall_progress(&steps, step, pct_of(v)),
             }),
             _ => {}
         },
     )
     .map_err(|e| friendly_error(&file_name, &e))?;
-    base += w;
     step += 1;
     let asr = AsrResult::load(&asr_json).map_err(|e| e.to_string())?;
 
@@ -383,7 +409,6 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
         if input.num_speakers > 0 {
             args.extend(["--num-speakers".into(), input.num_speakers.to_string()]);
         }
-        let w = steps[step].1;
         let res = run_worker(exe, &args, &dir.join("diar-worker.log"), &mut |v| match v
             .get("event")
             .and_then(Value::as_str)
@@ -391,7 +416,7 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
             Some("audio") => emit(Event::Detail("Finding who is speaking when".into())),
             Some("progress") => emit(Event::Progress {
                 step: pct_of(v),
-                overall: (base + w * pct_of(v)) / total,
+                overall: overall_progress(&steps, step, pct_of(v)),
             }),
             _ => {}
         });
@@ -410,7 +435,6 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
                 "Speaker detection failed ({e}); continuing without speakers."
             ))),
         }
-        base += w;
         step += 1;
     } else {
         emit(Event::Note(
@@ -462,7 +486,6 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
         if let Some(g) = &input.glossary {
             args.extend(["--glossary".into(), s(g)]);
         }
-        let w = steps[step].1;
         let res = run_worker(exe, &args, &dir.join("llm-worker.log"), &mut |v| {
             if v.get("event").and_then(Value::as_str) == Some("progress") {
                 emit(Event::Detail(
@@ -470,7 +493,7 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
                 ));
                 emit(Event::Progress {
                     step: pct_of(v),
-                    overall: (base + w * pct_of(v)) / total,
+                    overall: overall_progress(&steps, step, pct_of(v)),
                 });
             }
         });
@@ -520,6 +543,7 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
     emit(Event::Done {
         transcript: Box::new(transcript),
         outputs,
+        paths: ProjectPaths::new(dir, stem),
     });
     Ok(())
 }
@@ -544,4 +568,94 @@ pub fn write_outputs(t: &Transcript, dir: &Path, stem: &str) -> Result<Vec<PathB
         out.push(path);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_STEPS: [(&str, f32); 4] = [
+        ("Transcribing speech", 0.55),
+        ("Detecting speakers", 0.15),
+        ("Cleaning up the text", 0.25),
+        ("Saving files", 0.05),
+    ];
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    #[test]
+    fn a_step_after_cleanup_counts_the_cleanup_as_finished() {
+        // the save step starts at 95%; it used to count from 70%, as if cleanup had not run
+        assert!(close(overall_progress(&ALL_STEPS, 3, 0.0), 0.95));
+        assert!(close(overall_progress(&ALL_STEPS, 3, 0.5), 0.975));
+        assert!(close(overall_progress(&ALL_STEPS, 3, 1.0), 1.0));
+    }
+
+    #[test]
+    fn progress_rises_through_the_steps() {
+        assert!(close(overall_progress(&ALL_STEPS, 0, 0.0), 0.0));
+        assert!(close(overall_progress(&ALL_STEPS, 0, 1.0), 0.55));
+        assert!(close(overall_progress(&ALL_STEPS, 1, 0.0), 0.55));
+        assert!(close(overall_progress(&ALL_STEPS, 2, 0.5), 0.825));
+        let mut last = -1.0;
+        for step in 0..ALL_STEPS.len() {
+            for tenth in 0..=10 {
+                let now = overall_progress(&ALL_STEPS, step, tenth as f32 / 10.0);
+                assert!(now >= last - 1e-5, "went back at step {step}");
+                last = now;
+            }
+        }
+    }
+
+    #[test]
+    fn progress_scales_when_optional_steps_are_missing() {
+        let steps = [("Transcribing speech", 0.55), ("Saving files", 0.05)];
+        assert!(close(overall_progress(&steps, 1, 0.0), 0.55 / 0.60));
+        assert!(close(overall_progress(&steps, 1, 1.0), 1.0));
+    }
+
+    #[test]
+    fn progress_stays_in_range() {
+        assert!(close(overall_progress(&ALL_STEPS, 0, -3.0), 0.0));
+        assert!(close(overall_progress(&ALL_STEPS, 3, 7.0), 1.0));
+        assert!(close(overall_progress(&ALL_STEPS, 99, 0.5), 1.0));
+    }
+
+    #[test]
+    fn second_format_of_a_recording_gets_its_own_stem() {
+        let mp3 = Path::new("C:/media/meeting.mp3");
+        assert_eq!(result_stem(mp3, None), "meeting");
+        assert_eq!(result_stem(mp3, Some("meeting.mp3")), "meeting");
+        assert_eq!(result_stem(mp3, Some("meeting.mp4")), "meeting (mp3)");
+    }
+
+    #[test]
+    fn saving_again_with_the_stored_stem_rewrites_the_same_files() {
+        let dir = std::env::temp_dir().join(format!("vipr-pipeline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = Path::new("C:/media/meeting.mp3");
+        let stem = result_stem(media, Some("meeting.mp4"));
+        let t = Transcript::build("meeting.mp3", &empty_asr(), None, &[]);
+        let first = write_outputs(&t, &dir, &stem).unwrap();
+        let paths = ProjectPaths::new(&dir, stem);
+        let second = write_outputs(&t, &paths.dir, &paths.stem).unwrap();
+        let wrote_transcript = paths.transcript().is_file();
+        let plain_name_exists = dir.join("meeting.json").exists();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(first, second);
+        assert!(wrote_transcript);
+        assert!(!plain_name_exists, "would overwrite meeting.mp4's results");
+    }
+
+    fn empty_asr() -> AsrResult {
+        AsrResult {
+            model: None,
+            language: String::new(),
+            audio_seconds: 0.0,
+            elapsed_seconds: 0.0,
+            segments: Vec::new(),
+        }
+    }
 }

@@ -8,7 +8,9 @@ publish.workspace = true
 [dependencies]
 audioadapter = "5.0.0"
 audioadapter-buffers = "5.2.0"
+chardetng = "1.0.0"
 dirs = "7.0.0"
+encoding_rs = "0.8.44"
 gpu-detect = { version = "0.1.0", path = "../gpu-detect" }
 reqwest = { version = "0.13.5", default-features = false, features = [
   "blocking",
@@ -22,3 +24,5 @@ sha2 = "0.11.1"
 symphonia = { version = "0.6.1", features = ["all"] }
 symphonia-adapter-libopus = "0.3.0"
 thiserror = "2.0.21"
+unicode-bidi = "0.3.18"
+unicode-segmentation = "1.13.3"

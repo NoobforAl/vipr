@@ -5,7 +5,14 @@
 //! (see `pipeline.rs`); this file only draws and routes messages.
 
 mod icons;
+mod import_ui;
+mod jobs;
+mod marks_ui;
+mod out;
 mod pipeline;
+mod player;
+mod profiles_ui;
+mod review_ui;
 mod theme;
 
 use std::collections::HashMap;
@@ -14,6 +21,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use engine::download::{ModelStore, Status};
+use engine::project::ProjectPaths;
 use engine::registry::{Fit, ModelEntry, Preset, Registry, Role, fit};
 use engine::settings::Settings;
 use engine::transcript::{Transcript, clock};
@@ -27,6 +35,7 @@ use iced::widget::{
 use iced::{
     Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, window,
 };
+use out::{JobRef, Out, Page};
 use theme::{DARK, LIGHT, Tokens};
 
 /// Product name (PLAN.md D9). Also used for the data folders, see `engine::APP_DIR_NAME`.
@@ -210,6 +219,8 @@ struct Job {
     names_text: String,
     transcript: Option<Transcript>,
     outputs: Vec<PathBuf>,
+    /// Where the results are, with the real stem. Set when the job finishes.
+    paths: Option<ProjectPaths>,
     error: Option<String>,
 }
 
@@ -233,12 +244,6 @@ struct FfmpegProgress {
 enum CopyTarget {
     All,
     Row(usize),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Page {
-    Home,
-    Transcript(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +307,15 @@ enum Message {
     Download(String),
     DownloadAllMissing,
     DownloadUpdate(String, DownloadEvent),
+    // feature modules (see out.rs)
+    /// A key press that no widget used, so typing in a field can't trigger a shortcut.
+    Key(iced::keyboard::Key, iced::keyboard::Modifiers),
+    Player(player::Msg),
+    Marks(marks_ui::Msg),
+    Profiles(profiles_ui::Msg),
+    Import(import_ui::Msg),
+    Review(review_ui::Msg),
+    Jobs(jobs::Msg),
 }
 
 // ------------------------------------------------------------------ app state
@@ -342,6 +356,12 @@ struct App {
     ffmpeg_err: Option<String>,
     /// Files that were skipped only because they need ffmpeg; they are added once ffmpeg is ready.
     waiting_for_ffmpeg: Vec<PathBuf>,
+    player: player::State,
+    marks: marks_ui::State,
+    profiles: profiles_ui::State,
+    import: import_ui::State,
+    review: review_ui::State,
+    queue: jobs::State,
 }
 
 impl App {
@@ -391,6 +411,12 @@ impl App {
             ffmpeg_dl: None,
             ffmpeg_err: None,
             waiting_for_ffmpeg: Vec::new(),
+            player: player::State::default(),
+            marks: marks_ui::State::default(),
+            profiles: profiles_ui::State::default(),
+            import: import_ui::State::default(),
+            review: review_ui::State::default(),
+            queue: jobs::State::default(),
         };
         app.recompute_tokens();
         engine::audio::set_ffmpeg_override(app.settings.ffmpeg_path.clone());
@@ -413,6 +439,9 @@ impl App {
         if !preload.is_empty() {
             tasks.push(Task::done(Message::FilesPicked(preload)));
         }
+        let (task, out) = profiles_ui::init(&mut app.profiles);
+        tasks.push(task.map(Message::Profiles));
+        tasks.push(app.handle_out(out));
         (app, Task::batch(tasks))
     }
 
@@ -513,14 +542,145 @@ impl App {
         self.jobs.iter_mut().find(|j| j.id == id)
     }
 
+    /// A job with finished results, as the feature modules see it.
+    fn job_ref(&self, id: u64) -> Option<JobRef> {
+        let job = self.job(id)?;
+        Some(JobRef {
+            id,
+            media: job.path.clone(),
+            paths: job.paths.clone()?,
+        })
+    }
+
+    // -------------------------------------------------------------- feature modules
+
+    /// Do what a feature module asked for (see out.rs).
+    fn handle_out(&mut self, out: Out) -> Task<Message> {
+        match out {
+            Out::None => Task::none(),
+            Out::Open(page) => self.open_page(page),
+            Out::PlayAt { job, time } => {
+                let opened = if self.page == Page::Player(job) {
+                    Task::none()
+                } else {
+                    self.open_page(Page::Player(job))
+                };
+                if self.page != Page::Player(job) {
+                    return opened;
+                }
+                let seek = self.update(Message::Player(player::Msg::SeekTo(time)));
+                Task::batch([opened, seek])
+            }
+            Out::Enqueue(kind) => {
+                jobs::enqueue(&mut self.queue, kind);
+                self.start_next()
+            }
+            Out::Notice(line) => {
+                let mut lines = self.notice.take().map(|(l, _)| l).unwrap_or_default();
+                lines.push(line);
+                lines.truncate(8);
+                self.notice = Some((lines, Instant::now()));
+                Task::none()
+            }
+        }
+    }
+
+    /// Go to a page, opening or closing the feature modules it needs. A job without finished
+    /// results stays on the current page.
+    fn open_page(&mut self, page: Page) -> Task<Message> {
+        let job = match page {
+            Page::Player(id) | Page::Review(id) => match self.job_ref(id) {
+                Some(job) => Some(job),
+                None => return Task::none(),
+            },
+            Page::Home | Page::Transcript(_) => None,
+        };
+        if matches!(self.page, Page::Player(_)) && self.page != page {
+            player::close(&mut self.player);
+        }
+        match (page, job) {
+            (Page::Transcript(id), _) => self.update(Message::OpenJob(id)),
+            (Page::Player(_), Some(job)) => {
+                self.page = page;
+                let (task, out) = player::open(&mut self.player, &job);
+                let (marks_task, marks_out) = marks_ui::open(&mut self.marks, &job);
+                Task::batch([
+                    task.map(Message::Player),
+                    marks_task.map(Message::Marks),
+                    self.handle_out(out),
+                    self.handle_out(marks_out),
+                ])
+            }
+            (Page::Review(_), Some(job)) => {
+                self.page = page;
+                let (task, out) = review_ui::open(&mut self.review, &job);
+                Task::batch([task.map(Message::Review), self.handle_out(out)])
+            }
+            _ => {
+                self.page = page;
+                Task::none()
+            }
+        }
+    }
+
+    /// A key press that no widget used. Pages get them only while no dialog is open.
+    fn route_key(
+        &mut self,
+        key: iced::keyboard::Key,
+        mods: iced::keyboard::Modifiers,
+    ) -> Task<Message> {
+        if self.settings_open || import_ui::is_open(&self.import) {
+            return Task::none();
+        }
+        let message = match self.page {
+            Page::Player(_) => player::key(&self.player, &key, mods)
+                .map(Message::Player)
+                .or_else(|| {
+                    let at = player::position(&self.player);
+                    marks_ui::key(&self.marks, &key, mods, at).map(Message::Marks)
+                }),
+            Page::Review(_) => review_ui::key(&self.review, &key, mods).map(Message::Review),
+            Page::Home | Page::Transcript(_) => None,
+        };
+        match message {
+            Some(message) => self.update(message),
+            None => Task::none(),
+        }
+    }
+
+    /// The video and its controls, next to the marks.
+    fn player_page(&self) -> Element<'_, Message> {
+        let t = self.tokens;
+        let marks = marks_ui::marks(&self.marks);
+        row![
+            player::view(&self.player, t, marks).map(Message::Player),
+            marks_ui::view(&self.marks, t).map(Message::Marks),
+        ]
+        .into()
+    }
+
     // -------------------------------------------------------------- pipeline control
 
+    /// Run a queued translate or compare. Called when no transcription is waiting.
+    fn start_queued(&mut self) -> Task<Message> {
+        let Some(kind) = jobs::next(&mut self.queue) else {
+            return Task::none();
+        };
+        let context = jobs::JobContext {
+            job: self.job_ref(kind.job()),
+            model: self.model_path(Role::Llm),
+            profile: profiles_ui::active(&self.profiles, &self.settings),
+        };
+        let (task, out) = jobs::start(&mut self.queue, kind, context);
+        Task::batch([task.map(Message::Jobs), self.handle_out(out)])
+    }
+
     fn start_next(&mut self) -> Task<Message> {
-        if self.running.is_some() {
+        if self.running.is_some() || jobs::busy(&self.queue) {
             return Task::none();
         }
         let Some(idx) = self.jobs.iter().position(|j| j.state == JobState::Waiting) else {
-            return Task::none();
+            return self.start_queued();
         };
         let (Some(asr), Some(vad)) = (self.model_path(Role::Asr), self.model_path(Role::Vad))
         else {
@@ -687,6 +847,7 @@ impl App {
             Message::CloseWindow => {
                 // do not leave a worker running (and the GPU busy) after the window is gone
                 pipeline::request_cancel();
+                player::close(&mut self.player);
                 match self.win {
                     Some(id) => window::close(id),
                     None => iced::exit(),
@@ -763,6 +924,7 @@ impl App {
                                 names_text: String::new(),
                                 transcript: None,
                                 outputs: Vec::new(),
+                                paths: None,
                                 error: None,
                             });
                         }
@@ -783,7 +945,10 @@ impl App {
                     lines.truncate(8);
                     self.notice = Some((lines, Instant::now()));
                 }
-                self.page = Page::Home;
+                // adding a file must not interrupt playback or a review
+                if !matches!(self.page, Page::Player(_) | Page::Review(_)) {
+                    self.page = Page::Home;
+                }
                 Task::none()
             }
             Message::DismissNotice => {
@@ -846,8 +1011,11 @@ impl App {
             Message::Remove(id) => {
                 if self.running != Some(id) {
                     self.jobs.retain(|j| j.id != id);
-                    if self.page == Page::Transcript(id) {
-                        self.page = Page::Home;
+                    if matches!(
+                        self.page,
+                        Page::Transcript(p) | Page::Player(p) | Page::Review(p) if p == id
+                    ) {
+                        return self.open_page(Page::Home);
                     }
                 }
                 Task::none()
@@ -919,12 +1087,14 @@ impl App {
                     pipeline::Event::Done {
                         transcript,
                         outputs,
+                        paths,
                     } => {
                         if let Some(j) = self.job_mut(id) {
                             j.state = JobState::Done;
                             j.progress = 1.0;
                             j.transcript = Some(*transcript);
                             j.outputs = outputs;
+                            j.paths = Some(paths);
                         }
                         self.running = None;
                         return self.start_next();
@@ -970,10 +1140,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Back => {
-                self.page = Page::Home;
-                Task::none()
-            }
+            Message::Back => self.open_page(Page::Home),
             Message::MoreRows => {
                 self.shown += PAGE;
                 if let Page::Transcript(id) = self.page {
@@ -1010,7 +1177,7 @@ impl App {
                         .and_then(|j| j.transcript.as_ref())
                         .and_then(|t| t.utterances.get(i))
                         .map(|u| u.text.clone()),
-                    Page::Home => None,
+                    Page::Home | Page::Player(_) | Page::Review(_) => None,
                 };
                 match text {
                     Some(s) => {
@@ -1058,10 +1225,8 @@ impl App {
                                 t.rename_speaker(i, n);
                             }
                         }
-                        if let Some(first) = j.outputs.first()
-                            && let (Some(dir), Some(stem)) = (first.parent(), j.path.file_stem())
-                        {
-                            let _ = pipeline::write_outputs(t, dir, &stem.to_string_lossy());
+                        if let Some(paths) = &j.paths {
+                            let _ = pipeline::write_outputs(t, &paths.dir, &paths.stem);
                         }
                     }
                 }
@@ -1148,6 +1313,37 @@ impl App {
                 }
                 Task::none()
             }
+
+            Message::Key(key, mods) => self.route_key(key, mods),
+            Message::Player(msg) => {
+                let (task, out) = player::update(&mut self.player, msg);
+                Task::batch([task.map(Message::Player), self.handle_out(out)])
+            }
+            Message::Marks(msg) => {
+                let (task, out) = marks_ui::update(&mut self.marks, msg);
+                Task::batch([task.map(Message::Marks), self.handle_out(out)])
+            }
+            Message::Profiles(msg) => {
+                let active = self.settings.active_profile.clone();
+                let (task, out) = profiles_ui::update(&mut self.profiles, msg, &mut self.settings);
+                if self.settings.active_profile != active {
+                    self.save_settings();
+                }
+                Task::batch([task.map(Message::Profiles), self.handle_out(out)])
+            }
+            Message::Import(msg) => {
+                let (task, out) = import_ui::update(&mut self.import, msg);
+                Task::batch([task.map(Message::Import), self.handle_out(out)])
+            }
+            Message::Review(msg) => {
+                let (task, out) = review_ui::update(&mut self.review, msg);
+                Task::batch([task.map(Message::Review), self.handle_out(out)])
+            }
+            Message::Jobs(msg) => {
+                let (task, out) = jobs::update(&mut self.queue, msg);
+                let handled = self.handle_out(out);
+                Task::batch([task.map(Message::Jobs), handled, self.start_next()])
+            }
         }
     }
 
@@ -1168,7 +1364,8 @@ impl App {
             tick,
             iced::system::theme_changes().map(Message::SystemTheme),
             window::close_requests().map(|_| Message::CloseWindow),
-            event::listen_with(|ev, _status, _id| match ev {
+            player::subscription(&self.player).map(Message::Player),
+            event::listen_with(|ev, status, _id| match ev {
                 iced::Event::Window(window::Event::FileDropped(path)) => {
                     Some(Message::FilesPicked(vec![path]))
                 }
@@ -1187,6 +1384,9 @@ impl App {
                         Key::Character("m") if MAC && modifiers.command() => {
                             Some(Message::Minimize)
                         }
+                        _ if status == event::Status::Ignored => {
+                            Some(Message::Key(key.clone(), modifiers))
+                        }
                         _ => None,
                     }
                 }
@@ -1204,6 +1404,8 @@ impl App {
             let content = match self.page {
                 Page::Home => self.home_page(narrow),
                 Page::Transcript(id) => self.transcript_page(id),
+                Page::Player(_) => self.player_page(),
+                Page::Review(_) => review_ui::view(&self.review, t).map(Message::Review),
             };
             let divider = container(space::horizontal())
                 .width(Length::Fixed(1.0))
@@ -1239,6 +1441,17 @@ impl App {
                         .style(theme::scrim()),
                 )
                 .on_press(Message::CloseSettings),
+            ));
+        }
+        if import_ui::is_open(&self.import) {
+            layers.push(opaque(
+                container(center(
+                    import_ui::view(&self.import, t).map(Message::Import),
+                ))
+                .padding(24)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::scrim()),
             ));
         }
         // invisible handles on the window edges so the borderless window can still be resized
