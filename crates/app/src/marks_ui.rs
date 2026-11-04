@@ -51,9 +51,10 @@ pub fn open(state: &mut State, job: &JobRef) -> (Task<Msg>, Out) {
     state.store = match MarkStore::load(&path) {
         Ok(store) => Some(store),
         Err(e) => {
-            state.problem = Some(format!(
+            // the error can quote the file's content and its path, so it counts as untrusted
+            state.problem = Some(clean_separators(&format!(
                 "These marks could not be read, so the file was left as it is and new marks can't be added. {e}"
-            ));
+            )));
             None
         }
     };
@@ -143,7 +144,7 @@ fn save(state: &mut State) {
     state.problem = store
         .save()
         .err()
-        .map(|e| format!("Marks could not be saved: {e}"));
+        .map(|e| clean_separators(&format!("Marks could not be saved: {e}")));
 }
 
 /// Keep a note still being typed. Integration calls this when the window closes.
@@ -470,6 +471,41 @@ mod tests {
         send(&mut state, Msg::Remove(noted));
         assert!(marks(&state).is_empty());
         assert!(marks(&opened(&dir)).is_empty());
+    }
+
+    fn has_separator(text: &str) -> bool {
+        text.contains(['\u{2029}', '\u{85}', '\u{1C}', '\u{1D}', '\u{1E}'])
+    }
+
+    #[test]
+    fn a_marks_file_quoting_a_separator_in_its_error_is_cleaned_for_display() {
+        let dir = TestDir::new("error-quote");
+        let path = dir.job().paths.marks();
+        std::fs::write(&path, r#"{"marks":[{"id":1,"kind":"abc سلام","time":1.0}]}"#).unwrap();
+        let raw = MarkStore::load(&path).unwrap_err().to_string();
+        assert!(has_separator(&raw), "the engine error quotes it: {raw:?}");
+
+        let state = opened(&dir);
+        let problem = state.problem.unwrap();
+        assert!(!has_separator(&problem), "{problem:?}");
+        assert!(problem.contains("سلام"), "{problem:?}");
+    }
+
+    #[test]
+    fn a_failed_save_naming_a_path_with_a_separator_is_cleaned_for_display() {
+        let dir = TestDir::new("save-path");
+        let mut job = dir.job();
+        // the stem comes from the media's file name
+        job.paths.stem = "abc\u{2029}سلام".into();
+        let mut state = State::default();
+        let _ = open(&mut state, &job);
+        assert_eq!(state.problem, None);
+        // a folder at the file's path, so the save can't finish
+        std::fs::create_dir(job.paths.marks()).unwrap();
+        send(&mut state, Msg::Add(MarkKind::Bookmark, at(1.0, None)));
+        let problem = state.problem.unwrap();
+        assert!(problem.contains("could not be saved"), "{problem:?}");
+        assert!(!has_separator(&problem), "{problem:?}");
     }
 
     #[test]

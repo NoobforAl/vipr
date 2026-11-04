@@ -89,9 +89,11 @@ fn init_from(state: &mut State, path: &Path) -> Out {
     let loaded = ProfileStore::load(path);
     let first = loaded.store.profiles.first().map(|p| p.id.clone());
     state.store = Some(loaded.store);
-    state.notice = loaded.notice.clone();
+    // the notice can quote the file's content and its path, so it counts as untrusted
+    let notice = loaded.notice.as_deref().map(clean_separators);
+    state.notice = notice.clone();
     select(state, first);
-    loaded.notice.map_or(Out::None, Out::Notice)
+    notice.map_or(Out::None, Out::Notice)
 }
 
 /// `settings.active_profile` lives in `settings`. `main.rs` saves `settings` when that changes.
@@ -271,7 +273,11 @@ fn save_now(state: &mut State) {
             state.dirty = false;
             state.save_error = None;
         }
-        Err(e) => state.save_error = Some(format!("Profiles could not be saved: {e}")),
+        Err(e) => {
+            state.save_error = Some(clean_separators(&format!(
+                "Profiles could not be saved: {e}"
+            )));
+        }
     }
 }
 
@@ -537,6 +543,53 @@ mod tests {
         assert!(matches!(out, Out::Notice(line) if line.contains(".bak")));
         assert!(state.notice.is_some());
         assert!(state.selected.is_none());
+    }
+
+    fn has_separator(text: &str) -> bool {
+        text.contains(['\u{2029}', '\u{85}', '\u{1C}', '\u{1D}', '\u{1E}'])
+    }
+
+    #[test]
+    fn notices_and_save_errors_with_a_separator_are_cleaned_for_display() {
+        let dir = TestDir::new("separators");
+        // serde escapes this content when quoting it, but the notice names the folder unescaped
+        let folder = dir.0.join("abc\u{2029}سلام");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("profiles.json");
+        std::fs::write(&path, r#"{"version":"abc سلام"}"#).unwrap();
+
+        let raw = ProfileStore::load(&path).notice.unwrap();
+        assert!(has_separator(&raw), "the engine notice quotes it: {raw:?}");
+
+        std::fs::write(&path, r#"{"version":"abc سلام"}"#).unwrap();
+        let (mut state, mut settings) = (State::default(), Settings::default());
+        let out = init_from(&mut state, &path);
+        let Out::Notice(line) = out else {
+            panic!("expected a notice");
+        };
+        assert!(!has_separator(&line), "{line:?}");
+        assert!(!has_separator(state.notice.as_deref().unwrap()));
+
+        // a folder at the file's path, so the save fails and its error names the path
+        std::fs::create_dir(&path).unwrap();
+        send(&mut state, &mut settings, Msg::New);
+        let error = state.save_error.unwrap();
+        assert!(!has_separator(&error), "{error:?}");
+    }
+
+    #[test]
+    fn profile_text_from_a_file_is_cleaned_before_any_widget_gets_it() {
+        let dir = TestDir::new("file-text");
+        std::fs::write(
+            dir.file(),
+            r#"{"profiles":[{"id":"a","name":"abc سلام","prompt":"abc\u0085سلام",
+                "glossary":[{"source":"abc\u001Cسلام","target":"x سلام"}]}]}"#,
+        )
+        .unwrap();
+        let state = dir.state();
+        assert!(!has_separator(&state.name), "{:?}", state.name);
+        assert!(!has_separator(&state.prompt.text()));
+        assert!(!has_separator(&state.glossary.text()));
     }
 
     #[test]
