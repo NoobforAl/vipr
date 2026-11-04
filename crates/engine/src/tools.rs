@@ -46,7 +46,10 @@ pub fn tools_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("VIPR_TOOLS_DIR") {
         return PathBuf::from(d);
     }
-    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join(crate::APP_DIR_NAME).join("tools")
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(crate::APP_DIR_NAME)
+        .join("tools")
 }
 
 fn ffmpeg_dir() -> PathBuf {
@@ -54,7 +57,11 @@ fn ffmpeg_dir() -> PathBuf {
 }
 
 fn ffmpeg_exe_name() -> &'static str {
-    if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" }
+    if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
 }
 
 /// The ffmpeg that ViPr downloaded itself, if it is there.
@@ -88,9 +95,20 @@ pub fn install_ffmpeg(progress: &mut dyn FnMut(InstallStep)) -> Result<PathBuf> 
     let archive = dir.join(format!("ffmpeg-{}.7z", tool.version));
 
     let store = ModelStore::new(tools_dir());
-    store.fetch_file("ffmpeg", tool.url, &archive, 0, Some(tool.sha256), None, &mut |done, total| {
-        progress(InstallStep::Downloading { done, total: if total > 0 { total } else { tool.size_bytes } });
-    })?;
+    store.fetch_file(
+        "ffmpeg",
+        tool.url,
+        &archive,
+        0,
+        Some(tool.sha256),
+        None,
+        &mut |done, total| {
+            progress(InstallStep::Downloading {
+                done,
+                total: if total > 0 { total } else { tool.size_bytes },
+            });
+        },
+    )?;
 
     progress(InstallStep::Unpacking);
     let exe = unpack(&archive, &dir, tool.exe_in_archive)?;
@@ -101,7 +119,8 @@ pub fn install_ffmpeg(progress: &mut dyn FnMut(InstallStep)) -> Result<PathBuf> 
 /// Pull `ffmpeg.exe` (and the licence text) out of the 7z archive.
 fn unpack(archive: &Path, dir: &Path, exe_suffix: &str) -> Result<PathBuf> {
     let bad = |msg: String| Error::Audio(format!("could not unpack ffmpeg: {msg}"));
-    let mut reader = sevenz_rust2::ArchiveReader::open(archive, sevenz_rust2::Password::empty()).map_err(|e| bad(e.to_string()))?;
+    let mut reader = sevenz_rust2::ArchiveReader::open(archive, sevenz_rust2::Password::empty())
+        .map_err(|e| bad(e.to_string()))?;
     let exe_path = dir.join(ffmpeg_exe_name());
     let part = dir.join(format!("{}.part", ffmpeg_exe_name()));
     let mut found = false;
@@ -116,7 +135,8 @@ fn unpack(archive: &Path, dir: &Path, exe_suffix: &str) -> Result<PathBuf> {
                 std::io::copy(data, &mut out)?;
                 found = true;
             } else if name.ends_with("/LICENSE") || name.ends_with("/README.txt") {
-                let mut out = fs::File::create(dir.join(Path::new(&name).file_name().unwrap_or_default()))?;
+                let mut out =
+                    fs::File::create(dir.join(Path::new(&name).file_name().unwrap_or_default()))?;
                 std::io::copy(data, &mut out)?;
             }
             Ok(true)

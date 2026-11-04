@@ -42,7 +42,9 @@ def parse(path: Path) -> list[tuple[str, str]]:
 
 def is_verified(path: Path) -> bool:
     first = path.read_text(encoding="utf-8").splitlines()[:3]
-    return any(re.match(r"#\s*STATUS:\s*verified", line, re.I) for line in first)
+    return any(
+        re.match(r"#\s*STATUS:\s*verified", line, re.IGNORECASE) for line in first
+    )
 
 
 def edit_distance(a: list[str], b: list[str]) -> int:
@@ -55,10 +57,14 @@ def edit_distance(a: list[str], b: list[str]) -> int:
     return prev[-1]
 
 
-def speaker_accuracy(gold: list[tuple[str, str]], hyp: list[tuple[str, str]]) -> float | None:
+def speaker_accuracy(
+    gold: list[tuple[str, str]], hyp: list[tuple[str, str]]
+) -> float | None:
     gw, hw = [w for _, w in gold], [w for _, w in hyp]
     pairs: list[tuple[str, str]] = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, gw, hw, autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, gw, hw, autojunk=False
+    ).get_opcodes():
         if tag == "equal":
             pairs += [(gold[i1 + k][0], hyp[j1 + k][0]) for k in range(i2 - i1)]
     if not pairs:
@@ -67,7 +73,11 @@ def speaker_accuracy(gold: list[tuple[str, str]], hyp: list[tuple[str, str]]) ->
     h_labels = sorted({h for _, h in pairs})
     best = 0
     # try every way of matching hypothesis speakers to gold speakers (few speakers => cheap)
-    for perm in itertools.permutations(h_labels, min(len(h_labels), len(g_labels))) if len(h_labels) <= 6 else []:
+    for perm in (
+        itertools.permutations(h_labels, min(len(h_labels), len(g_labels)))
+        if len(h_labels) <= 6
+        else []
+    ):
         mapping = dict(zip(g_labels, perm))
         best = max(best, sum(1 for g, h in pairs if mapping.get(g) == h))
     return best / len(pairs)
@@ -84,15 +94,21 @@ def pct(x: float | None) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dir", default=str(HERE / "clips"), help="folder with <id>.gold.txt etc.")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--dir", default=str(HERE / "clips"), help="folder with <id>.gold.txt etc."
+    )
     ap.add_argument("--hyp-dir", help="extra engine output folder with <id>.txt files")
     ap.add_argument("--allow-unverified", action="store_true")
     args = ap.parse_args()
 
     clips = Path(args.dir)
-    sources = {"raw": lambda cid: clips / f"{cid}.raw.txt",
-               "refined": lambda cid: clips / f"{cid}.refined.txt"}
+    sources = {
+        "raw": lambda cid: clips / f"{cid}.raw.txt",
+        "refined": lambda cid: clips / f"{cid}.refined.txt",
+    }
     if args.hyp_dir:
         sources["engine"] = lambda cid: Path(args.hyp_dir) / f"{cid}.txt"
 
@@ -115,32 +131,52 @@ def main() -> None:
     if skipped:
         print(f"Skipped (not verified yet): {', '.join(skipped)}\n")
     if not rows:
-        sys.exit("No verified clips. Correct validation/clips/*.gold.txt and set '# STATUS: verified'.")
+        sys.exit(
+            "No verified clips. Correct validation/clips/*.gold.txt and set '# STATUS: verified'."
+        )
 
     names = list(sources)
     print(f"{'clip':<5}{'words':>6} | " + " | ".join(f"{n:^15}" for n in names))
     print(f"{'':<5}{'':>6} | " + " | ".join(f"{'WER':>7} {'spk':>7}" for _ in names))
-    totals = {n: [0.0, 0.0, 0, 0.0, 0] for n in names}   # wer*words, words, spk sum, spk n
+    totals = {
+        n: [0.0, 0.0, 0, 0.0, 0] for n in names
+    }  # wer*words, words, spk sum, spk n
     for r in rows:
         cells = []
         for n in names:
             s = r[n]
-            cells.append(f"{pct(s[0]):>7} {pct(s[1]):>7}" if s else f"{'-':>7} {'-':>7}")
+            cells.append(
+                f"{pct(s[0]):>7} {pct(s[1]):>7}" if s else f"{'-':>7} {'-':>7}"
+            )
             if s:
                 t = totals[n]
-                t[0] += s[0] * r["words"]; t[1] += r["words"]
+                t[0] += s[0] * r["words"]
+                t[1] += r["words"]
                 if s[1] is not None:
-                    t[2] += s[1] * r["words"]; t[3] += r["words"]
+                    t[2] += s[1] * r["words"]
+                    t[3] += r["words"]
         print(f"{r['id']:<5}{r['words']:>6} | " + " | ".join(cells))
     print("-" * (14 + 18 * len(names)))
     cells = []
     for n in names:
         t = totals[n]
-        cells.append(f"{pct(t[0] / t[1] if t[1] else None):>7} {pct(t[2] / t[3] if t[3] else None):>7}")
+        cells.append(
+            f"{pct(t[0] / t[1] if t[1] else None):>7} {pct(t[2] / t[3] if t[3] else None):>7}"
+        )
     print(f"{'ALL':<5}{sum(r['words'] for r in rows):>6} | " + " | ".join(cells))
-    if "raw" in totals and "refined" in totals and totals["raw"][1] and totals["refined"][1]:
-        d = totals["refined"][0] / totals["refined"][1] - totals["raw"][0] / totals["raw"][1]
-        print(f"\nLLM refine changes WER by {d * 100:+.1f} points ({'better' if d < 0 else 'worse' if d > 0 else 'same'}).")
+    if (
+        "raw" in totals
+        and "refined" in totals
+        and totals["raw"][1]
+        and totals["refined"][1]
+    ):
+        d = (
+            totals["refined"][0] / totals["refined"][1]
+            - totals["raw"][0] / totals["raw"][1]
+        )
+        print(
+            f"\nLLM refine changes WER by {d * 100:+.1f} points ({'better' if d < 0 else 'worse' if d > 0 else 'same'})."
+        )
 
 
 if __name__ == "__main__":

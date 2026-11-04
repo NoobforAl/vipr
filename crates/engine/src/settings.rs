@@ -39,26 +39,41 @@ fn yes() -> bool {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { models: BTreeMap::new(), output_dir: None, ffmpeg_path: None, theme: default_theme(), cleanup: true, num_speakers: 0 }
+        Settings {
+            models: BTreeMap::new(),
+            output_dir: None,
+            ffmpeg_path: None,
+            theme: default_theme(),
+            cleanup: true,
+            num_speakers: 0,
+        }
     }
 }
 
 impl Settings {
     /// Default results folder: `<Documents>/<app folder>`.
     pub fn default_output_dir() -> PathBuf {
-        dirs::document_dir().unwrap_or_else(|| PathBuf::from(".")).join(crate::APP_DIR_NAME)
+        dirs::document_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(crate::APP_DIR_NAME)
     }
 
     pub fn path() -> PathBuf {
         if let Some(p) = std::env::var_os("MT_SETTINGS") {
             return PathBuf::from(p);
         }
-        dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join(crate::APP_DIR_NAME).join("settings.json")
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(crate::APP_DIR_NAME)
+            .join("settings.json")
     }
 
     /// A missing or unreadable file gives the defaults (settings must never stop the app from starting).
     pub fn load() -> Settings {
-        std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        std::fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<()> {
@@ -66,7 +81,10 @@ impl Settings {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io_err(dir))?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|e| Error::Registry { path: path.display().to_string(), msg: e.to_string() })?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| Error::Registry {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })?;
         std::fs::write(&path, json).map_err(io_err(&path))
     }
 }
@@ -86,6 +104,9 @@ mod tests {
 
     #[test]
     fn garbage_file_gives_defaults() {
-        assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), Settings::default());
+        assert_eq!(
+            serde_json::from_str::<Settings>("{}").unwrap(),
+            Settings::default()
+        );
     }
 }

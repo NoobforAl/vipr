@@ -34,7 +34,19 @@ from faster_whisper import WhisperModel
 from imageio_ffmpeg import get_ffmpeg_exe
 from tqdm import tqdm
 
-VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4a", ".mp3", ".wav", ".flac", ".ogg", ".ts"}
+VIDEO_EXTS = {
+    ".mp4",
+    ".mkv",
+    ".mov",
+    ".avi",
+    ".webm",
+    ".m4a",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".ogg",
+    ".ts",
+}
 SAMPLE_RATE = 16_000
 DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 
@@ -97,7 +109,11 @@ def free_cuda() -> None:
 
 def is_oom(exc: BaseException) -> bool:
     msg = str(exc).lower()
-    return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in msg or "cuda failed" in msg
+    return (
+        isinstance(exc, torch.cuda.OutOfMemoryError)
+        or "out of memory" in msg
+        or "cuda failed" in msg
+    )
 
 
 # --------------------------------------------------------------------------- 1. audio
@@ -108,8 +124,20 @@ def extract_audio(video: Path, wav: Path) -> None:
     wav.parent.mkdir(parents=True, exist_ok=True)
     tmp = wav.with_suffix(".part.wav")
     cmd = [
-        get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(video),
-        "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(tmp),
+        get_ffmpeg_exe(),
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-c:a",
+        "pcm_s16le",
+        str(tmp),
     ]
     subprocess.run(cmd, check=True)
     tmp.replace(wav)
@@ -131,7 +159,10 @@ def transcribe(wav: Path, args: argparse.Namespace) -> tuple[list[Word], str]:
         if args.glossary_terms:
             terms = ", ".join(args.glossary_terms)
             # hotwords bias every 30 s window; initial_prompt primes the first one.
-            glossary_kwargs = {"hotwords": terms, "initial_prompt": f"Glossary: {terms}."}
+            glossary_kwargs = {
+                "hotwords": terms,
+                "initial_prompt": f"Glossary: {terms}.",
+            }
             print(f"  [whisper] glossary: {len(args.glossary_terms)} terms")
         segments, info = model.transcribe(
             audio,
@@ -139,14 +170,18 @@ def transcribe(wav: Path, args: argparse.Namespace) -> tuple[list[Word], str]:
             language=args.language,
             beam_size=5,
             word_timestamps=True,
-            vad_filter=True,                       # skips silence, avoids hallucinations
+            vad_filter=True,  # skips silence, avoids hallucinations
             vad_parameters={"min_silence_duration_ms": 500},
-            condition_on_previous_text=False,      # avoids repetition loops on long audio
+            condition_on_previous_text=False,  # avoids repetition loops on long audio
         )
-        print(f"  [whisper] language={info.language} (p={info.language_probability:.2f}), "
-              f"duration={fmt_time(info.duration)}")
+        print(
+            f"  [whisper] language={info.language} (p={info.language_probability:.2f}), "
+            f"duration={fmt_time(info.duration)}"
+        )
         words: list[Word] = []
-        with tqdm(total=round(info.duration), unit="s", desc="  transcribing", leave=False) as bar:
+        with tqdm(
+            total=round(info.duration), unit="s", desc="  transcribing", leave=False
+        ) as bar:
             for seg in segments:
                 for w in seg.words or []:
                     words.append(Word(w.start, w.end, w.word))
@@ -180,7 +215,9 @@ def load_diarization_pipeline(token: str | None):
     return Pipeline.from_pretrained(DIARIZATION_MODEL, token=token)
 
 
-def diarize(wav: Path, args: argparse.Namespace, token: str | None) -> list[tuple[float, float, str]]:
+def diarize(
+    wav: Path, args: argparse.Namespace, token: str | None
+) -> list[tuple[float, float, str]]:
     audio, sr = sf.read(str(wav), dtype="float32", always_2d=True)
     # Pre-loaded waveform => pyannote never needs torchcodec/ffmpeg shared libs.
     inputs = {"waveform": torch.from_numpy(audio.T.copy()), "sample_rate": sr}
@@ -198,7 +235,9 @@ def diarize(wav: Path, args: argparse.Namespace, token: str | None) -> list[tupl
     if pipeline is None:
         sys.exit(
             f"Could not load {DIARIZATION_MODEL}.\n"
-            "  1. Accept the model terms at https://huggingface.co/" + DIARIZATION_MODEL + "\n"
+            "  1. Accept the model terms at https://huggingface.co/"
+            + DIARIZATION_MODEL
+            + "\n"
             "  2. Create a read token at https://huggingface.co/settings/tokens\n"
             "  3. Set it:  $env:HF_TOKEN = 'hf_...'   (or pass --hf-token)"
         )
@@ -210,9 +249,9 @@ def diarize(wav: Path, args: argparse.Namespace, token: str | None) -> list[tupl
             pipeline.to(torch.device(dev))
             out = pipeline(inputs, **kwargs)
             break
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if dev != "cpu" and is_oom(exc):
-                print(f"  [pyannote] GPU out of memory -> retrying on CPU (slower)")
+                print("  [pyannote] GPU out of memory -> retrying on CPU (slower)")
                 free_cuda()
                 continue
             raise
@@ -221,9 +260,12 @@ def diarize(wav: Path, args: argparse.Namespace, token: str | None) -> list[tupl
 
     # pyannote 4.x: `exclusive_speaker_diarization` has no overlapping turns, which is
     # exactly what you want when aligning with ASR. Older versions return an Annotation.
-    annotation = getattr(out, "exclusive_speaker_diarization", None) \
-        or getattr(out, "speaker_diarization", out)
-    return [(t.start, t.end, spk) for t, _, spk in annotation.itertracks(yield_label=True)]
+    annotation = getattr(out, "exclusive_speaker_diarization", None) or getattr(
+        out, "speaker_diarization", out
+    )
+    return [
+        (t.start, t.end, spk) for t, _, spk in annotation.itertracks(yield_label=True)
+    ]
 
 
 # --------------------------------------------------------------------------- 4. merge
@@ -246,7 +288,9 @@ def assign_speakers(words: list[Word], turns: list[tuple[float, float, str]]) ->
         w.speaker = turns[idx][2]
 
 
-def build_conversation(words: list[Word], max_gap: float = 2.0) -> list[tuple[float, float, str, str]]:
+def build_conversation(
+    words: list[Word], max_gap: float = 2.0
+) -> list[tuple[float, float, str, str]]:
     """Group consecutive words of one speaker into utterances."""
     convo: list[list] = []  # [start, end, speaker, text]
     for w in words:
@@ -294,30 +338,100 @@ def find_inputs(paths: list[str]) -> list[Path]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("inputs", nargs="*", default=[str(ROOT)], help="video files and/or folders (default: the project folder)")
-    ap.add_argument("-o", "--output-dir", default=str(ROOT / "transcripts"), help="where .txt files go (default: <project>/transcripts)")
-    ap.add_argument("--audio-dir", default=str(ROOT / "audio"), help="where extracted WAVs are cached (default: <project>/audio)")
-    ap.add_argument("--model", default="large-v3-turbo", help="faster-whisper model (e.g. large-v3-turbo, large-v3, medium, small)")
-    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"], help="device for Whisper (default: cuda)")
-    ap.add_argument("--diar-device", default=None, choices=["cuda", "cpu"], help="device for diarization (default: same as --device)")
-    ap.add_argument("--compute-type", default="int8_float16", help="int8_float16 (4 GB GPUs) | float16 | int8")
-    ap.add_argument("--language", default="en", help="language code, e.g. en, ar, fr; 'auto' to detect (default: en)")
-    ap.add_argument("--glossary", default=str(ROOT / "glossary.txt"),
-                    help="text file of names/jargon (one per line or comma-separated) that Whisper should "
-                         "prefer when a word sounds ambiguous (default: glossary.txt if it exists)")
-    ap.add_argument("--num-speakers", type=int, default=2, help="exact number of speakers (default: 2; 0 = detect)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "inputs",
+        nargs="*",
+        default=[str(ROOT)],
+        help="video files and/or folders (default: the project folder)",
+    )
+    ap.add_argument(
+        "-o",
+        "--output-dir",
+        default=str(ROOT / "transcripts"),
+        help="where .txt files go (default: <project>/transcripts)",
+    )
+    ap.add_argument(
+        "--audio-dir",
+        default=str(ROOT / "audio"),
+        help="where extracted WAVs are cached (default: <project>/audio)",
+    )
+    ap.add_argument(
+        "--model",
+        default="large-v3-turbo",
+        help="faster-whisper model (e.g. large-v3-turbo, large-v3, medium, small)",
+    )
+    ap.add_argument(
+        "--device",
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="device for Whisper (default: cuda)",
+    )
+    ap.add_argument(
+        "--diar-device",
+        default=None,
+        choices=["cuda", "cpu"],
+        help="device for diarization (default: same as --device)",
+    )
+    ap.add_argument(
+        "--compute-type",
+        default="int8_float16",
+        help="int8_float16 (4 GB GPUs) | float16 | int8",
+    )
+    ap.add_argument(
+        "--language",
+        default="en",
+        help="language code, e.g. en, ar, fr; 'auto' to detect (default: en)",
+    )
+    ap.add_argument(
+        "--glossary",
+        default=str(ROOT / "glossary.txt"),
+        help="text file of names/jargon (one per line or comma-separated) that Whisper should "
+        "prefer when a word sounds ambiguous (default: glossary.txt if it exists)",
+    )
+    ap.add_argument(
+        "--num-speakers",
+        type=int,
+        default=2,
+        help="exact number of speakers (default: 2; 0 = detect)",
+    )
     ap.add_argument("--min-speakers", type=int, default=None)
     ap.add_argument("--max-speakers", type=int, default=None)
-    ap.add_argument("--hf-token", default=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"),
-                    help="Hugging Face token (or set HF_TOKEN)")
-    ap.add_argument("--no-refine", action="store_true",
-                    help="skip the LLM step that fixes misheard words / speaker labels (see refine_transcripts.py)")
-    ap.add_argument("--refined-dir", default=str(ROOT / "refined"), help="where the LLM-improved transcripts go (default: <project>/refined)")
-    ap.add_argument("--llm", default=None, help="override the refine LLM (default: Qwen/Qwen3-4B-Instruct-2507)")
-    ap.add_argument("--force", action="store_true", help="re-process meetings that already have a transcript")
-    ap.add_argument("--keep-audio", action="store_true", default=True, help=argparse.SUPPRESS)
-    ap.add_argument("--delete-audio", action="store_true", help="delete the extracted WAV after each meeting")
+    ap.add_argument(
+        "--hf-token",
+        default=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"),
+        help="Hugging Face token (or set HF_TOKEN)",
+    )
+    ap.add_argument(
+        "--no-refine",
+        action="store_true",
+        help="skip the LLM step that fixes misheard words / speaker labels (see refine_transcripts.py)",
+    )
+    ap.add_argument(
+        "--refined-dir",
+        default=str(ROOT / "refined"),
+        help="where the LLM-improved transcripts go (default: <project>/refined)",
+    )
+    ap.add_argument(
+        "--llm",
+        default=None,
+        help="override the refine LLM (default: Qwen/Qwen3-4B-Instruct-2507)",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="re-process meetings that already have a transcript",
+    )
+    ap.add_argument(
+        "--keep-audio", action="store_true", default=True, help=argparse.SUPPRESS
+    )
+    ap.add_argument(
+        "--delete-audio",
+        action="store_true",
+        help="delete the extracted WAV after each meeting",
+    )
     args = ap.parse_args()
 
     if args.language == "auto":
@@ -332,7 +446,11 @@ def main() -> None:
 
     # Never treat our own output folders as inputs
     out_dir, audio_dir = Path(args.output_dir), Path(args.audio_dir)
-    videos = [v for v in find_inputs(args.inputs) if audio_dir.resolve() not in v.resolve().parents]
+    videos = [
+        v
+        for v in find_inputs(args.inputs)
+        if audio_dir.resolve() not in v.resolve().parents
+    ]
     if not videos:
         sys.exit("No video/audio files found.")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -357,7 +475,9 @@ def main() -> None:
             words, language = transcribe(wav, args)
             if not words:
                 print("  no speech detected")
-                txt.write_text(f"Meeting: {video.stem}\n\n(no speech detected)\n", encoding="utf-8")
+                txt.write_text(
+                    f"Meeting: {video.stem}\n\n(no speech detected)\n", encoding="utf-8"
+                )
                 continue
             turns = diarize(wav, args, args.hf_token)
             assign_speakers(words, turns)
@@ -383,8 +503,11 @@ def main() -> None:
         import refine_transcripts
 
         refine_transcripts.refine_paths(
-            sorted(done), Path(args.refined_dir), args.glossary_terms,
-            args.llm or refine_transcripts.MODEL_ID, args.force,
+            sorted(done),
+            Path(args.refined_dir),
+            args.glossary_terms,
+            args.llm or refine_transcripts.MODEL_ID,
+            args.force,
         )
 
 

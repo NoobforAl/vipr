@@ -109,7 +109,8 @@ pub fn detect() -> Detection {
 /// ("Parent device is lost"). The GUI normally runs the `detect` tool in a separate process instead and only
 /// uses this as a fallback.
 pub fn detect_without_graphics() -> Detection {
-    let mut notes = vec!["Graphics adapters were not probed; only NVIDIA cards are listed.".to_string()];
+    let mut notes =
+        vec!["Graphics adapters were not probed; only NVIDIA cards are listed.".to_string()];
     let gpus = probe_nvml(&mut notes);
     decide(gpus, notes)
 }
@@ -150,10 +151,21 @@ fn decide(gpus: Vec<GpuInfo>, notes: Vec<String>) -> Detection {
         };
         (Backend::Vulkan, Some(i), format!("{why}: {}", g.name))
     } else {
-        (Backend::Cpu, None, "No usable GPU found; running on the CPU".to_string())
+        (
+            Backend::Cpu,
+            None,
+            "No usable GPU found; running on the CPU".to_string(),
+        )
     };
 
-    Detection { os: os.to_string(), gpus, recommended, recommended_gpu: idx, reason, notes }
+    Detection {
+        os: os.to_string(),
+        gpus,
+        recommended,
+        recommended_gpu: idx,
+        reason,
+        notes,
+    }
 }
 
 fn probe_nvml(notes: &mut Vec<String>) -> Vec<GpuInfo> {
@@ -161,18 +173,26 @@ fn probe_nvml(notes: &mut Vec<String>) -> Vec<GpuInfo> {
     let nvml = match Nvml::init() {
         Ok(n) => n,
         Err(e) => {
-            notes.push(format!("NVML not available ({e}); no NVIDIA driver or no NVIDIA GPU"));
+            notes.push(format!(
+                "NVML not available ({e}); no NVIDIA driver or no NVIDIA GPU"
+            ));
             return Vec::new();
         }
     };
     let driver = nvml.sys_driver_version().ok();
     let cuda_driver = nvml.sys_cuda_driver_version().ok().map(|v| {
-        format!("{}.{}", nvml_wrapper::cuda_driver_version_major(v), nvml_wrapper::cuda_driver_version_minor(v))
+        format!(
+            "{}.{}",
+            nvml_wrapper::cuda_driver_version_major(v),
+            nvml_wrapper::cuda_driver_version_minor(v)
+        )
     });
     let count = nvml.device_count().unwrap_or(0);
     let mut out = Vec::new();
     for i in 0..count {
-        let Ok(dev) = nvml.device_by_index(i) else { continue };
+        let Ok(dev) = nvml.device_by_index(i) else {
+            continue;
+        };
         let mem = dev.memory_info().ok();
         out.push(GpuInfo {
             name: dev.name().unwrap_or_else(|_| format!("NVIDIA GPU {i}")),
@@ -181,7 +201,10 @@ fn probe_nvml(notes: &mut Vec<String>) -> Vec<GpuInfo> {
             vram_free_mb: mem.as_ref().map(|m| m.free / (1024 * 1024)),
             driver: driver.clone(),
             cuda_driver: cuda_driver.clone(),
-            compute_capability: dev.cuda_compute_capability().ok().map(|c| format!("{}.{}", c.major, c.minor)),
+            compute_capability: dev
+                .cuda_compute_capability()
+                .ok()
+                .map(|c| format!("{}.{}", c.major, c.minor)),
             integrated: false,
             source: Source::Nvml,
         });
@@ -192,7 +215,9 @@ fn probe_nvml(notes: &mut Vec<String>) -> Vec<GpuInfo> {
 fn probe_wgpu(notes: &mut Vec<String>) -> Vec<GpuInfo> {
     use wgpu::{Backends, DeviceType, Instance};
     let instance = Instance::default();
-    let adapters = pollster::block_on(instance.enumerate_adapters(Backends::VULKAN | Backends::DX12 | Backends::METAL));
+    let adapters = pollster::block_on(
+        instance.enumerate_adapters(Backends::VULKAN | Backends::DX12 | Backends::METAL),
+    );
     if adapters.is_empty() {
         notes.push("wgpu found no graphics adapters (no Vulkan / DX12 / Metal driver?)".into());
     }
@@ -213,7 +238,11 @@ fn probe_wgpu(notes: &mut Vec<String>) -> Vec<GpuInfo> {
             vendor: Vendor::from_pci(info.vendor),
             vram_mb: None,
             vram_free_mb: None,
-            driver: if info.driver.is_empty() { None } else { Some(info.driver) },
+            driver: if info.driver.is_empty() {
+                None
+            } else {
+                Some(info.driver)
+            },
             cuda_driver: None,
             compute_capability: None,
             integrated: matches!(info.device_type, DeviceType::IntegratedGpu),
@@ -239,13 +268,19 @@ pub struct GpuMonitor {
 
 impl GpuMonitor {
     pub fn new() -> Self {
-        GpuMonitor { nvml: nvml_wrapper::Nvml::init().ok() }
+        GpuMonitor {
+            nvml: nvml_wrapper::Nvml::init().ok(),
+        }
     }
 
     /// Usage of the first NVIDIA GPU, or all `None` when there is none.
     pub fn sample(&self) -> GpuUsage {
-        let Some(nvml) = &self.nvml else { return GpuUsage::default() };
-        let Ok(dev) = nvml.device_by_index(0) else { return GpuUsage::default() };
+        let Some(nvml) = &self.nvml else {
+            return GpuUsage::default();
+        };
+        let Ok(dev) = nvml.device_by_index(0) else {
+            return GpuUsage::default();
+        };
         let mem = dev.memory_info().ok();
         GpuUsage {
             gpu_percent: dev.utilization_rates().ok().map(|u| u.gpu),
@@ -281,7 +316,13 @@ mod tests {
 
     #[test]
     fn nvidia_with_driver_picks_cuda() {
-        let d = decide(vec![gpu(Vendor::Intel, Source::Wgpu, None, true), gpu(Vendor::Nvidia, Source::Nvml, Some(4096), false)], vec![]);
+        let d = decide(
+            vec![
+                gpu(Vendor::Intel, Source::Wgpu, None, true),
+                gpu(Vendor::Nvidia, Source::Nvml, Some(4096), false),
+            ],
+            vec![],
+        );
         assert_eq!(d.recommended, Backend::Cuda);
         assert_eq!(d.recommended_gpu, Some(1));
     }
@@ -312,7 +353,13 @@ mod tests {
 
     #[test]
     fn prefers_discrete_over_integrated() {
-        let d = decide(vec![gpu(Vendor::Intel, Source::Wgpu, None, true), gpu(Vendor::Amd, Source::Wgpu, None, false)], vec![]);
+        let d = decide(
+            vec![
+                gpu(Vendor::Intel, Source::Wgpu, None, true),
+                gpu(Vendor::Amd, Source::Wgpu, None, false),
+            ],
+            vec![],
+        );
         if std::env::consts::OS != "macos" {
             assert_eq!(d.recommended_gpu, Some(1));
         }

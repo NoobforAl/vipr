@@ -27,15 +27,21 @@ FILLERS = {"uh", "um", "uhm", "umm", "erm", "uhh", "hmm", "mm"}
 
 
 def tokens(text: str) -> list[str]:
-    return [w for w in TOKEN_RE.findall(text.lower().replace("’", "'")) if w not in FILLERS]
+    return [
+        w for w in TOKEN_RE.findall(text.lower().replace("’", "'")) if w not in FILLERS
+    ]
 
 
 def python_lines(name: str) -> list[tuple[float, int, list[str]]]:
     out = []
-    for line in (ROOT / "transcripts" / f"{name}.txt").read_text(encoding="utf-8").splitlines():
+    for line in (
+        (ROOT / "transcripts" / f"{name}.txt").read_text(encoding="utf-8").splitlines()
+    ):
         m = LINE_RE.match(line)
         if m:
-            out.append((int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3]), int(m[4]), tokens(m[5])))
+            out.append(
+                (int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3]), int(m[4]), tokens(m[5]))
+            )
     return out
 
 
@@ -54,7 +60,11 @@ def speaker_at(turns: list[dict], t0: float, t1: float) -> int | None:
     mid = (t0 + t1) / 2
 
     def dist(t: dict) -> float:
-        return t["start"] - mid if mid < t["start"] else (mid - t["end"] if mid > t["end"] else 0.0)
+        return (
+            t["start"] - mid
+            if mid < t["start"]
+            else (mid - t["end"] if mid > t["end"] else 0.0)
+        )
 
     return min(turns, key=dist)["speaker"]
 
@@ -83,15 +93,25 @@ def main() -> None:
 
     print(f"meeting         : {name}")
     print(f"audio           : {diar['audio_seconds']:.0f} s")
-    print(f"diarization time: {diar['elapsed_seconds']:.1f} s  ({diar['audio_seconds'] / max(diar['elapsed_seconds'], 1e-9):.1f}x real time)")
+    print(
+        f"diarization time: {diar['elapsed_seconds']:.1f} s  ({diar['audio_seconds'] / max(diar['elapsed_seconds'], 1e-9):.1f}x real time)"
+    )
     spk_time: dict[int, float] = {}
     for t in turns:
         spk_time[t["speaker"]] = spk_time.get(t["speaker"], 0.0) + t["end"] - t["start"]
     total = sum(spk_time.values()) or 1.0
     print(f"turns           : {len(turns)}  |  speakers: {len(spk_time)}")
     py_speakers = sorted({spk for _, spk, _ in lines})
-    print(f"speakers        : detected {len(spk_time)} | Python pipeline (forced 2) {len(py_speakers)}")
-    print("speaker split   : " + ", ".join(f"S{k + 1} {v / total * 100:.0f}% ({v:.0f}s)" for k, v in sorted(spk_time.items())))
+    print(
+        f"speakers        : detected {len(spk_time)} | Python pipeline (forced 2) {len(py_speakers)}"
+    )
+    print(
+        "speaker split   : "
+        + ", ".join(
+            f"S{k + 1} {v / total * 100:.0f}% ({v:.0f}s)"
+            for k, v in sorted(spk_time.items())
+        )
+    )
 
     conf: dict[tuple[int, int], float] = {}
     if asr_path:
@@ -99,15 +119,21 @@ def main() -> None:
         for seg in json.loads(asr_path.read_text(encoding="utf-8"))["segments"]:
             for w in seg.get("words", []):
                 toks = tokens(w["text"])
-                for k, tok in enumerate(toks):  # a word may hold several tokens (what's up -> "what's")
+                for k, tok in enumerate(
+                    toks
+                ):  # a word may hold several tokens (what's up -> "what's")
                     span = (w["end"] - w["start"]) / len(toks)
-                    words.append((tok, w["start"] + k * span, w["start"] + (k + 1) * span))
+                    words.append(
+                        (tok, w["start"] + k * span, w["start"] + (k + 1) * span)
+                    )
         ref_tokens: list[str] = []
         ref_speaker: list[int] = []
         for _, spk, toks in lines:
             ref_tokens += toks
             ref_speaker += [spk] * len(toks)
-        sm = difflib.SequenceMatcher(None, ref_tokens, [w[0] for w in words], autojunk=False)
+        sm = difflib.SequenceMatcher(
+            None, ref_tokens, [w[0] for w in words], autojunk=False
+        )
         matched = 0
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
             if tag != "equal":
@@ -117,19 +143,32 @@ def main() -> None:
                 rust = speaker_at(turns, s, e)
                 if rust is None:
                     continue
-                conf[(ref_speaker[i], rust)] = conf.get((ref_speaker[i], rust), 0.0) + max(e - s, 0.05)
+                conf[(ref_speaker[i], rust)] = conf.get(
+                    (ref_speaker[i], rust), 0.0
+                ) + max(e - s, 0.05)
                 matched += 1
         agree, mapping = best_agreement(conf)
-        print(f"compared words  : {matched} of {len(ref_tokens)} python words (aligned to Rust ASR words)")
-        print(f"AGREEMENT       : {agree * 100:.1f}% of word time has the same speaker as the Python pipeline")
-        print("speaker mapping : " + ", ".join(f"python S{p} = rust S{r + 1}" for p, r in sorted(mapping.items())))
+        print(
+            f"compared words  : {matched} of {len(ref_tokens)} python words (aligned to Rust ASR words)"
+        )
+        print(
+            f"AGREEMENT       : {agree * 100:.1f}% of word time has the same speaker as the Python pipeline"
+        )
+        print(
+            "speaker mapping : "
+            + ", ".join(
+                f"python S{p} = rust S{r + 1}" for p, r in sorted(mapping.items())
+            )
+        )
         # which direction do the errors go
         for (p, r), v in sorted(conf.items()):
             print(f"   python S{p} / rust S{r + 1}: {v:7.0f} s")
     else:
         for k, (start, spk, toks) in enumerate(lines):
             end = lines[k + 1][0] if k + 1 < len(lines) else start + 5
-            end = min(end, start + max(1.0, len(toks) * 0.45))  # a line rarely fills the whole gap to the next one
+            end = min(
+                end, start + max(1.0, len(toks) * 0.45)
+            )  # a line rarely fills the whole gap to the next one
             t = start
             while t < end:
                 rust = speaker_at(turns, t, min(t + 1.0, end))
@@ -137,7 +176,9 @@ def main() -> None:
                     conf[(spk, rust)] = conf.get((spk, rust), 0.0) + min(1.0, end - t)
                 t += 1.0
         agree, mapping = best_agreement(conf)
-        print(f"AGREEMENT (rough, line intervals): {agree * 100:.1f}%  - pass the ASR json for word-level numbers")
+        print(
+            f"AGREEMENT (rough, line intervals): {agree * 100:.1f}%  - pass the ASR json for word-level numbers"
+        )
 
 
 if __name__ == "__main__":

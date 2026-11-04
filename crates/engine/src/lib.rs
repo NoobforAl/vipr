@@ -21,7 +21,10 @@ pub use gpu_detect;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io error on {path}: {source}")]
-    Io { path: String, source: std::io::Error },
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("invalid registry {path}: {msg}")]
     Registry { path: String, msg: String },
     #[error("audio: {0}")]
@@ -33,11 +36,18 @@ pub enum Error {
     #[error("download failed: {0}")]
     Http(String),
     #[error("sha256 mismatch for {id}: expected {expected}, got {actual}")]
-    HashMismatch { id: String, expected: String, actual: String },
+    HashMismatch {
+        id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn io_err(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
-    move |source| Error::Io { path: path.display().to_string(), source }
+    move |source| Error::Io {
+        path: path.display().to_string(),
+        source,
+    }
 }

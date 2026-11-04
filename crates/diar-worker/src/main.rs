@@ -88,7 +88,12 @@ fn session(env: &ort::environment::Environment, path: &PathBuf, threads: usize) 
 }
 
 /// Run segmentation on one window (zero-padded to 10 s).
-fn segment_window(sess: &mut Session, audio: &[f32], start: usize, scale: f32) -> Result<WindowSeg> {
+fn segment_window(
+    sess: &mut Session,
+    audio: &[f32],
+    start: usize,
+    scale: f32,
+) -> Result<WindowSeg> {
     let end = (start + WINDOW).min(audio.len());
     let mut data = vec![0f32; WINDOW];
     for (d, s) in data.iter_mut().zip(&audio[start..end]) {
@@ -100,17 +105,25 @@ fn segment_window(sess: &mut Session, audio: &[f32], start: usize, scale: f32) -
     let frames = shape[1] as usize;
     let classes_n = shape[2] as usize;
     if classes_n != 7 {
-        return Err(anyhow!("unexpected segmentation output with {classes_n} classes (expected 7)"));
+        return Err(anyhow!(
+            "unexpected segmentation output with {classes_n} classes (expected 7)"
+        ));
     }
     let mut classes = Vec::with_capacity(frames);
     let mut single_logp = Vec::with_capacity(frames);
     for f in 0..frames {
         let row = &values[f * 7..f * 7 + 7];
-        let best = (0..7).max_by(|&a, &b| row[a].total_cmp(&row[b])).unwrap_or(0);
+        let best = (0..7)
+            .max_by(|&a, &b| row[a].total_cmp(&row[b]))
+            .unwrap_or(0);
         classes.push(best as u8);
         single_logp.push([row[1], row[2], row[3]]);
     }
-    Ok(WindowSeg { start, classes, single_logp })
+    Ok(WindowSeg {
+        start,
+        classes,
+        single_logp,
+    })
 }
 
 /// WeSpeaker embedding of a piece of audio (unit length).
@@ -118,7 +131,8 @@ fn embed(sess: &mut Session, samples: &[f32]) -> Result<Vec<f32>> {
     let feats = knf_rs::compute_fbank(samples).map_err(|e| anyhow!("fbank: {e}"))?;
     let (frames, bins) = feats.dim();
     let data: Vec<f32> = feats.as_standard_layout().iter().copied().collect();
-    let tensor = Tensor::from_array((vec![1i64, frames as i64, bins as i64], data)).map_err(ort_err)?;
+    let tensor =
+        Tensor::from_array((vec![1i64, frames as i64, bins as i64], data)).map_err(ort_err)?;
     let outs = sess.run(ort::inputs!["feats" => tensor]).map_err(ort_err)?;
     let (_, values) = outs["embs"].try_extract_tensor::<f32>().map_err(ort_err)?;
     let mut v = values.to_vec();
@@ -150,15 +164,22 @@ fn run(args: &Args) -> Result<()> {
     let n_windows = audio.len().div_ceil(WINDOW).max(1);
     let mut windows: Vec<WindowSeg> = Vec::with_capacity(n_windows);
     for w in 0..n_windows {
-        windows.push(segment_window(&mut seg_sess, &audio, w * WINDOW, args.seg_scale)?);
+        windows.push(segment_window(
+            &mut seg_sess,
+            &audio,
+            w * WINDOW,
+            args.seg_scale,
+        )?);
         event(json!({"event": "progress", "percent": (w + 1) * 40 / n_windows}));
     }
 
     // 2. one embedding per (window, local speaker): clean audio if there is enough, else everything it says
     let mut items: Vec<Item> = Vec::new();
     let mut embs: Vec<Vec<f32>> = Vec::new();
-    let candidates: Vec<(usize, usize)> =
-        (0..windows.len()).flat_map(|w| (0..3).map(move |l| (w, l))).filter(|&(w, l)| windows[w].active_seconds(l) > 0.0).collect();
+    let candidates: Vec<(usize, usize)> = (0..windows.len())
+        .flat_map(|w| (0..3).map(move |l| (w, l)))
+        .filter(|&(w, l)| windows[w].active_seconds(l) > 0.0)
+        .collect();
     for (done, &(w, l)) in candidates.iter().enumerate() {
         let win = &windows[w];
         let (ranges, seconds) = if win.clean_seconds(l) >= MIN_EMBED_SECONDS {
@@ -191,9 +212,15 @@ fn run(args: &Args) -> Result<()> {
             continue;
         }
         embs.push(embed(&mut emb_sess, &piece)?);
-        items.push(Item { window: w, local: l, weight: seconds as f32 });
+        items.push(Item {
+            window: w,
+            local: l,
+            weight: seconds as f32,
+        });
         if done % 8 == 0 {
-            event(json!({"event": "progress", "percent": 40 + (done + 1) * 55 / candidates.len().max(1)}));
+            event(
+                json!({"event": "progress", "percent": 40 + (done + 1) * 55 / candidates.len().max(1)}),
+            );
         }
     }
 
@@ -207,8 +234,18 @@ fn run(args: &Args) -> Result<()> {
     } else {
         if args.debug_merges {
             let probe = agglomerative(&embs, &weights, -1.0, 1);
-            let tail: Vec<String> = probe.merge_sims.iter().rev().take(8).map(|s| format!("{s:.2}")).collect();
-            eprintln!("points: {}  last merges (similarity, last first): {}", embs.len(), tail.join(" "));
+            let tail: Vec<String> = probe
+                .merge_sims
+                .iter()
+                .rev()
+                .take(8)
+                .map(|s| format!("{s:.2}"))
+                .collect();
+            eprintln!(
+                "points: {}  last merges (similarity, last first): {}",
+                embs.len(),
+                tail.join(" ")
+            );
             // what the clusters look like before tiny ones are merged away
             let raw = cluster_auto(&embs, &weights, args.stop_sim, args.max_speakers, 0.0);
             let mut secs = vec![0f32; raw.centroids.len()];
@@ -221,12 +258,25 @@ fn run(args: &Args) -> Result<()> {
             eprintln!("clusters before merging tiny ones: {}", desc.join(" "));
             for (i, &a) in order.iter().enumerate().take(4) {
                 for &b in order.iter().skip(i + 1).take(4) {
-                    let sim: f32 = raw.centroids[a].iter().zip(&raw.centroids[b]).map(|(x, y)| x * y).sum();
-                    eprintln!("   centroid similarity {:.0}s vs {:.0}s: {sim:.2}", secs[a], secs[b]);
+                    let sim: f32 = raw.centroids[a]
+                        .iter()
+                        .zip(&raw.centroids[b])
+                        .map(|(x, y)| x * y)
+                        .sum();
+                    eprintln!(
+                        "   centroid similarity {:.0}s vs {:.0}s: {sim:.2}",
+                        secs[a], secs[b]
+                    );
                 }
             }
         }
-        let c = cluster_auto(&embs, &weights, args.stop_sim, args.max_speakers, args.min_speaker_seconds);
+        let c = cluster_auto(
+            &embs,
+            &weights,
+            args.stop_sim,
+            args.max_speakers,
+            args.min_speaker_seconds,
+        );
         c.labels
     };
     let mut cluster_of = vec![[None::<usize>; 3]; windows.len()];
@@ -248,7 +298,10 @@ fn run(args: &Args) -> Result<()> {
             if a >= audio.len() {
                 continue;
             }
-            let (t0, t1) = (a as f64 / SAMPLE_RATE, b.min(audio.len()) as f64 / SAMPLE_RATE);
+            let (t0, t1) = (
+                a as f64 / SAMPLE_RATE,
+                b.min(audio.len()) as f64 / SAMPLE_RATE,
+            );
             let pick = members
                 .iter()
                 .copied()
@@ -274,7 +327,12 @@ fn run(args: &Args) -> Result<()> {
 
     let mut turns: Vec<DiarTurn> = merge_frames(&frames, args.max_gap, 0.1);
     renumber_by_first_appearance(&mut turns);
-    let speakers_found = turns.iter().map(|t| t.speaker).max().map(|m| m + 1).unwrap_or(0);
+    let speakers_found = turns
+        .iter()
+        .map(|t| t.speaker)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
 
     let elapsed = started.elapsed().as_secs_f64();
     let result = json!({
@@ -286,7 +344,8 @@ fn run(args: &Args) -> Result<()> {
     if let Some(dir) = args.out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&args.out, serde_json::to_string_pretty(&result)?).with_context(|| format!("writing {}", args.out.display()))?;
+    std::fs::write(&args.out, serde_json::to_string_pretty(&result)?)
+        .with_context(|| format!("writing {}", args.out.display()))?;
     event(json!({
         "event": "done",
         "output": args.out,

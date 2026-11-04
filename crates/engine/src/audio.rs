@@ -51,10 +51,17 @@ pub fn decode_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
     }
 
     let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|e| audio_err(path, format!("unsupported or damaged file ({e})")))?;
 
-    let track = format.default_track(TrackType::Audio).ok_or_else(|| audio_err(path, "no audio track"))?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| audio_err(path, "no audio track"))?;
     let track_id = track.id;
     let known_delay = track.delay;
     let params = track
@@ -64,7 +71,9 @@ pub fn decode_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
         .ok_or_else(|| audio_err(path, "audio track has no codec parameters"))?;
     // AAC (MP4 / MOV / M4A) starts with 1024 priming samples that ffmpeg trims but symphonia does not,
     // which would shift every timestamp by 21 ms at 48 kHz. Only applied when the file gives no delay itself.
-    let aac_priming = if params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC && known_delay.is_none() {
+    let aac_priming = if params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC
+        && known_delay.is_none()
+    {
         1024
     } else {
         0
@@ -98,7 +107,11 @@ pub fn decode_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
                 if channels == 1 {
                     mono.extend_from_slice(&scratch);
                 } else {
-                    mono.extend(scratch.chunks_exact(channels).map(|f| f.iter().sum::<f32>() / channels as f32));
+                    mono.extend(
+                        scratch
+                            .chunks_exact(channels)
+                            .map(|f| f.iter().sum::<f32>() / channels as f32),
+                    );
                 }
             }
             // a damaged packet is skipped; too many means the file is unusable
@@ -125,10 +138,13 @@ pub fn resample_mono(samples: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>> 
         return Ok(samples);
     }
     let frames = samples.len();
-    let input = InterleavedOwned::new_from(samples, 1, frames).map_err(|e| Error::Audio(format!("resample buffer: {e}")))?;
+    let input = InterleavedOwned::new_from(samples, 1, frames)
+        .map_err(|e| Error::Audio(format!("resample buffer: {e}")))?;
     let mut resampler = Fft::<f32>::new(from as usize, to as usize, 1024, 1, FixedSync::Both)
         .map_err(|e| Error::Audio(format!("resampler {from} -> {to} Hz: {e}")))?;
-    let out = resampler.process_all(&input, frames, None).map_err(|e| Error::Audio(format!("resampling failed: {e}")))?;
+    let out = resampler
+        .process_all(&input, frames, None)
+        .map_err(|e| Error::Audio(format!("resampling failed: {e}")))?;
     Ok(out.take_data())
 }
 
@@ -143,7 +159,11 @@ pub fn set_ffmpeg_override(path: Option<PathBuf>) {
 
 /// The ffmpeg the user picked in Settings, if any (passed on to the worker programs).
 pub fn ffmpeg_override() -> Option<PathBuf> {
-    FFMPEG_OVERRIDE.lock().ok().and_then(|g| g.clone()).filter(|p| p.is_file())
+    FFMPEG_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|p| p.is_file())
 }
 
 /// Places where ffmpeg is usually installed but which are often **not** on the PATH (winget, scoop, Chocolatey,
@@ -156,7 +176,12 @@ fn well_known_ffmpeg(name: &str) -> Option<PathBuf> {
             candidates.push(local.join("Microsoft/WinGet/Links").join(name));
             // winget unpacks the "Gyan.FFmpeg" / "BtbN.FFmpeg" packages into a versioned folder without a PATH entry
             if let Ok(pkgs) = std::fs::read_dir(local.join("Microsoft/WinGet/Packages")) {
-                for pkg in pkgs.flatten().filter(|e| e.file_name().to_string_lossy().to_lowercase().contains("ffmpeg")) {
+                for pkg in pkgs.flatten().filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains("ffmpeg")
+                }) {
                     if let Some(found) = find_file(&pkg.path(), name, 4) {
                         return Some(found);
                     }
@@ -177,7 +202,13 @@ fn well_known_ffmpeg(name: &str) -> Option<PathBuf> {
         }
         candidates.push(PathBuf::from("C:/ffmpeg/bin").join(name));
     } else {
-        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/snap/bin", "/opt/local/bin"] {
+        for dir in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/snap/bin",
+            "/opt/local/bin",
+        ] {
             candidates.push(Path::new(dir).join(name));
         }
     }
@@ -193,7 +224,11 @@ fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     if depth == 0 {
         return None;
     }
-    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().is_dir()).find_map(|e| find_file(&e.path(), name, depth - 1))
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .find_map(|e| find_file(&e.path(), name, depth - 1))
 }
 
 /// Where an `ffmpeg` program can be found, if any: the one picked in Settings, `VIPR_FFMPEG`, next to the running
@@ -201,16 +236,30 @@ fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 /// Homebrew, ...). ffmpeg is optional; it lets ViPr read formats the built-in decoders cannot
 /// (AVI, WMV / WMA, FLV, MPEG-TS, MPG / VOB, 3GP / AMR, AC3, DTS, ...).
 pub fn find_ffmpeg() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
     if let Some(p) = ffmpeg_override() {
         return Some(p);
     }
-    if let Some(p) = std::env::var_os("VIPR_FFMPEG").map(PathBuf::from).filter(|p| p.is_file()) {
+    if let Some(p) = std::env::var_os("VIPR_FFMPEG")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
         return Some(p);
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         for rel in ["", "ffmpeg", "tools", "workers"] {
-            let p = if rel.is_empty() { dir.join(name) } else { dir.join(rel).join(name) };
+            let p = if rel.is_empty() {
+                dir.join(name)
+            } else {
+                dir.join(rel).join(name)
+            };
             if p.is_file() {
                 return Some(p);
             }
@@ -224,7 +273,11 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     if std::env::var_os("VIPR_HIDE_SYSTEM_FFMPEG").is_some() {
         return None;
     }
-    if let Some(p) = std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file())) {
+    if let Some(p) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())
+    }) {
         return Some(p);
     }
     well_known_ffmpeg(name)
@@ -243,12 +296,28 @@ fn decode_with_ffmpeg(ffmpeg: &Path, path: &Path) -> Result<Vec<f32>> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // no console window
     }
-    let out = cmd.output().map_err(|e| audio_err(path, format!("could not start ffmpeg ({e})")))?;
+    let out = cmd
+        .output()
+        .map_err(|e| audio_err(path, format!("could not start ffmpeg ({e})")))?;
     if !out.status.success() || out.stdout.len() < 4 {
-        let why = String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("no sound found").trim().to_string();
-        return Err(audio_err(path, format!("ffmpeg could not read this file ({why})")));
+        let why = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .last()
+            .unwrap_or("no sound found")
+            .trim()
+            .to_string();
+        return Err(audio_err(
+            path,
+            format!("ffmpeg could not read this file ({why})"),
+        ));
     }
-    Ok(out.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    Ok(out
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect())
 }
 
 /// Decode a media file to mono 16 kHz samples. This is the entry point the engine stages use.
@@ -266,7 +335,9 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<Vec<f32>> {
                 Some(ffmpeg) => decode_with_ffmpeg(&ffmpeg, path).map_err(|e| {
                     Error::Audio(format!("{e} (the built-in decoders said: {native})"))
                 }),
-                None => Err(Error::Audio(format!("{native} - this format needs ffmpeg to be read (ffmpeg was not found)"))),
+                None => Err(Error::Audio(format!(
+                    "{native} - this format needs ffmpeg to be read (ffmpeg was not found)"
+                ))),
             }
         }
     }
@@ -285,25 +356,40 @@ pub enum Probe {
 
 /// Extensions that can only be read through ffmpeg (used to tell "needs ffmpeg" from "not a media file").
 const FFMPEG_ONLY: [&str; 18] = [
-    "avi", "wmv", "wma", "asf", "flv", "ts", "mts", "m2ts", "mpg", "mpeg", "vob", "amr", "ac3", "eac3", "dts", "wv", "ape", "spx",
+    "avi", "wmv", "wma", "asf", "flv", "ts", "mts", "m2ts", "mpg", "mpeg", "vob", "amr", "ac3",
+    "eac3", "dts", "wv", "ape", "spx",
 ];
 
 /// Can the built-in decoders really decode sound from this file? Opens it, picks the audio track and decodes a few packets,
 /// so a text file renamed to `.mp3` is not accepted just because the name looks right.
 fn native_can_read(path: &Path) -> bool {
-    let Ok(file) = File::open(path) else { return false };
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let Ok(mut format) = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()) else {
+    let Ok(mut format) = symphonia::default::get_probe().probe(
+        &hint,
+        mss,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    ) else {
         return false;
     };
-    let Some(track) = format.default_track(TrackType::Audio) else { return false };
+    let Some(track) = format.default_track(TrackType::Audio) else {
+        return false;
+    };
     let track_id = track.id;
-    let Some(params) = track.codec_params.as_ref().and_then(|p| p.audio()) else { return false };
-    let Ok(mut decoder) = codecs().make_audio_decoder(params, &AudioDecoderOptions::default()) else { return false };
+    let Some(params) = track.codec_params.as_ref().and_then(|p| p.audio()) else {
+        return false;
+    };
+    let Ok(mut decoder) = codecs().make_audio_decoder(params, &AudioDecoderOptions::default())
+    else {
+        return false;
+    };
     let (mut decoded, mut attempts) = (0, 0);
     while attempts < 60 && decoded < 3 {
         attempts += 1;
@@ -323,7 +409,11 @@ fn native_can_read(path: &Path) -> bool {
 /// Ask ffmpeg whether it can read sound from the file (decodes the first second only).
 fn ffmpeg_can_read(ffmpeg: &Path, path: &Path) -> bool {
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-v", "error", "-nostdin", "-i"]).arg(path).args(["-vn", "-t", "1", "-f", "null", "-"]).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["-v", "error", "-nostdin", "-i"])
+        .arg(path)
+        .args(["-vn", "-t", "1", "-f", "null", "-"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -353,11 +443,17 @@ pub fn probe_media(path: &Path) -> Probe {
             if ffmpeg_can_read(&ffmpeg, path) {
                 Probe::Ok
             } else {
-                Probe::Invalid("has no sound that can be read (it may be damaged or not a media file)".into())
+                Probe::Invalid(
+                    "has no sound that can be read (it may be damaged or not a media file)".into(),
+                )
             }
         }
         None => {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             if FFMPEG_ONLY.contains(&ext.as_str()) {
                 Probe::NeedsFfmpeg
             } else {
@@ -407,10 +503,15 @@ mod tests {
     #[test]
     fn resample_keeps_length_ratio_and_tone() {
         // 1 s of a 440 Hz tone at 48 kHz -> 16 kHz
-        let tone: Vec<f32> =
-            (0..48_000).map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin() * 0.5).collect();
+        let tone: Vec<f32> = (0..48_000)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin() * 0.5)
+            .collect();
         let out = resample_mono(tone, 48_000, 16_000).unwrap();
-        assert!((out.len() as i64 - 16_000).abs() < 64, "got {} samples", out.len());
+        assert!(
+            (out.len() as i64 - 16_000).abs() < 64,
+            "got {} samples",
+            out.len()
+        );
         let rms = (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt();
         assert!((rms - 0.3535).abs() < 0.03, "rms {rms}");
     }
@@ -442,14 +543,21 @@ mod tests {
         // a text file pretending to be an MP3
         let fake = dir.join("fake.mp3");
         std::fs::write(&fake, "this is just text, not audio\n".repeat(200)).unwrap();
-        assert!(matches!(probe_media(&fake), Probe::Invalid(_)), "{:?}", probe_media(&fake));
+        assert!(
+            matches!(probe_media(&fake), Probe::Invalid(_)),
+            "{:?}",
+            probe_media(&fake)
+        );
 
         // empty file, folder, missing file
         let empty = dir.join("empty.wav");
         std::fs::write(&empty, b"").unwrap();
         assert!(matches!(probe_media(&empty), Probe::Invalid(_)));
         assert!(matches!(probe_media(&dir), Probe::Invalid(_)));
-        assert!(matches!(probe_media(&dir.join("nope.mp3")), Probe::Invalid(_)));
+        assert!(matches!(
+            probe_media(&dir.join("nope.mp3")),
+            Probe::Invalid(_)
+        ));
 
         // a text file called .avi: never accepted (needs ffmpeg when it is missing, invalid when it is there)
         let fake_avi = dir.join("fake.avi");

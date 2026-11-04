@@ -21,10 +21,12 @@ use gpu_detect::Detection;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, pick_list, progress_bar, responsive, row, scrollable, space,
-    stack, svg, text, text_editor, text_input, toggler,
+    button, center, column, container, mouse_area, opaque, pick_list, progress_bar, responsive,
+    row, scrollable, space, stack, svg, text, text_editor, text_input, toggler,
 };
-use iced::{Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, window};
+use iced::{
+    Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, window,
+};
 use theme::{DARK, LIGHT, Tokens};
 
 /// Product name (PLAN.md D9). Also used for the data folders, see `engine::APP_DIR_NAME`.
@@ -32,7 +34,13 @@ const APP_NAME: &str = "ViPr";
 const VERSION: &str = "0.1.0";
 
 /// Models listed in Settings (the translate role comes back with translation, after 0.1.0).
-const ROLES: [Role; 5] = [Role::Asr, Role::Vad, Role::DiarSegmentation, Role::DiarEmbedding, Role::Llm];
+const ROLES: [Role; 5] = [
+    Role::Asr,
+    Role::Vad,
+    Role::DiarSegmentation,
+    Role::DiarEmbedding,
+    Role::Llm,
+];
 
 const CATEGORIES: [(&str, &str); 7] = [
     ("default", "General"),
@@ -47,21 +55,25 @@ const CATEGORIES: [(&str, &str); 7] = [
 /// File types offered by the file picker. The first group is read by ViPr itself; the second needs ffmpeg.
 const MEDIA_EXTENSIONS: &[&str] = &[
     // built-in decoders
-    "mp4", "m4v", "mov", "mkv", "webm", "mka", "ogg", "oga", "opus", "mp3", "mp2", "wav", "flac", "m4a", "aac", "aif", "aiff", "caf", "3gp",
-    // through ffmpeg
-    "avi", "wmv", "wma", "asf", "flv", "ts", "mts", "m2ts", "mpg", "mpeg", "vob", "amr", "ac3", "eac3", "dts", "wv", "ape", "spx", "rm", "mxf",
+    "mp4", "m4v", "mov", "mkv", "webm", "mka", "ogg", "oga", "opus", "mp3", "mp2", "wav", "flac",
+    "m4a", "aac", "aif", "aiff", "caf", "3gp", // through ffmpeg
+    "avi", "wmv", "wma", "asf", "flv", "ts", "mts", "m2ts", "mpg", "mpeg", "vob", "amr", "ac3",
+    "eac3", "dts", "wv", "ape", "spx", "rm", "mxf",
 ];
 
 /// Extensions worth looking into (the file picker list plus a few rarer names). Files with any other name are ignored.
 const KNOWN_EXTENSIONS: &[&str] = &[
-    "m4b", "m4p", "wave", "3g2", "ogv", "weba", "f4v", "mpe", "m2v", "m2a", "mp4a", "qt", "tod", "dv", "divx", "xvid", "ogx",
+    "m4b", "m4p", "wave", "3g2", "ogv", "weba", "f4v", "mpe", "m2v", "m2a", "mp4a", "qt", "tod",
+    "dv", "divx", "xvid", "ogx",
 ];
 
 fn has_media_extension(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
-        .is_some_and(|e| MEDIA_EXTENSIONS.contains(&e.as_str()) || KNOWN_EXTENSIONS.contains(&e.as_str()))
+        .is_some_and(|e| {
+            MEDIA_EXTENSIONS.contains(&e.as_str()) || KNOWN_EXTENSIONS.contains(&e.as_str())
+        })
 }
 
 const PAGE: usize = 150; // transcript rows drawn at once
@@ -115,7 +127,10 @@ fn corner_radius() -> f32 {
     static RADIUS: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *RADIUS.get_or_init(|| {
         if cfg!(target_os = "windows") {
-            let build = sysinfo::System::kernel_version().ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let build = sysinfo::System::kernel_version()
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
             if build >= 22000 { 8.0 } else { 0.0 }
         } else {
             0.0
@@ -128,7 +143,11 @@ const APP_ICON_SVG: &[u8] = include_bytes!("../../../assets/icon/vipr.svg");
 
 /// The ViPr icon (assets/icon/vipr-256.png) as the window / taskbar icon.
 fn window_icon() -> Option<window::Icon> {
-    let mut reader = png::Decoder::new(std::io::Cursor::new(include_bytes!("../../../assets/icon/vipr-256.png"))).read_info().ok()?;
+    let mut reader = png::Decoder::new(std::io::Cursor::new(include_bytes!(
+        "../../../assets/icon/vipr-256.png"
+    )))
+    .read_info()
+    .ok()?;
     let mut buf = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
@@ -333,7 +352,11 @@ impl App {
         let mut selection = HashMap::new();
         if let Ok(reg) = &registry {
             for role in ROLES {
-                if let Some(id) = settings.models.get(&role).filter(|id| reg.get(id).is_ok_and(|m| m.has_role(role))) {
+                if let Some(id) = settings
+                    .models
+                    .get(&role)
+                    .filter(|id| reg.get(id).is_ok_and(|m| m.has_role(role)))
+                {
                     selection.insert(role, id.clone());
                 }
             }
@@ -373,8 +396,15 @@ impl App {
         engine::audio::set_ffmpeg_override(app.settings.ffmpeg_path.clone());
         app.ffmpeg = engine::audio::find_ffmpeg();
         // dev helper: MT_PRELOAD="a.mp4;b.mp4" queues files at start-up
-        let preload: Vec<PathBuf> =
-            std::env::var("MT_PRELOAD").ok().map(|v| v.split(';').filter(|p| !p.is_empty()).map(PathBuf::from).collect()).unwrap_or_default();
+        let preload: Vec<PathBuf> = std::env::var("MT_PRELOAD")
+            .ok()
+            .map(|v| {
+                v.split(';')
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut tasks = vec![
             iced::system::theme().map(Message::SystemTheme),
             window::oldest().map(Message::WinId),
@@ -401,12 +431,19 @@ impl App {
     }
 
     fn save_settings(&mut self) {
-        self.settings.models = self.selection.iter().map(|(r, id)| (*r, id.clone())).collect();
+        self.settings.models = self
+            .selection
+            .iter()
+            .map(|(r, id)| (*r, id.clone()))
+            .collect();
         let _ = self.settings.save(); // a failed save must not disturb the user
     }
 
     fn output_dir(&self) -> PathBuf {
-        self.settings.output_dir.clone().unwrap_or_else(Settings::default_output_dir)
+        self.settings
+            .output_dir
+            .clone()
+            .unwrap_or_else(Settings::default_output_dir)
     }
 
     fn entry(&self, role: Role) -> Option<&ModelEntry> {
@@ -431,7 +468,12 @@ impl App {
 
     /// True while something on screen is waiting for data (drives the spinner animation).
     fn is_loading(&self) -> bool {
-        self.detection.is_none() || (self.settings_open && self.usage.is_none()) || self.running.is_some() || self.copied.is_some() || self.notice.is_some() || self.ffmpeg_dl.is_some()
+        self.detection.is_none()
+            || (self.settings_open && self.usage.is_none())
+            || self.running.is_some()
+            || self.copied.is_some()
+            || self.notice.is_some()
+            || self.ffmpeg_dl.is_some()
     }
 
     /// Rotating arc, for "working on it" states.
@@ -441,13 +483,20 @@ impl App {
 
     /// Grey placeholder bar shown where data is about to appear.
     fn skeleton<'a>(&self, width: Length, height: f32) -> Element<'a, Message> {
-        container(space::horizontal()).width(width).height(Length::Fixed(height)).style(theme::rounded_fill(self.tokens.hover, 6.0)).into()
+        container(space::horizontal())
+            .width(width)
+            .height(Length::Fixed(height))
+            .style(theme::rounded_fill(self.tokens.hover, 6.0))
+            .into()
     }
 
     fn meter_placeholder<'a>(&self, label: &'a str) -> Element<'a, Message> {
         let t = self.tokens;
         row![
-            text(label).size(13).color(t.faint).width(Length::Fixed(120.0)),
+            text(label)
+                .size(13)
+                .color(t.faint)
+                .width(Length::Fixed(120.0)),
             self.skeleton(Length::Fill, 8.0),
             self.skeleton(Length::Fixed(70.0), 8.0),
         ]
@@ -470,19 +519,32 @@ impl App {
         if self.running.is_some() {
             return Task::none();
         }
-        let Some(idx) = self.jobs.iter().position(|j| j.state == JobState::Waiting) else { return Task::none() };
-        let (Some(asr), Some(vad)) = (self.model_path(Role::Asr), self.model_path(Role::Vad)) else {
+        let Some(idx) = self.jobs.iter().position(|j| j.state == JobState::Waiting) else {
+            return Task::none();
+        };
+        let (Some(asr), Some(vad)) = (self.model_path(Role::Asr), self.model_path(Role::Vad))
+        else {
             self.jobs[idx].state = JobState::Failed;
             self.jobs[idx].error = Some("Download the speech models in Settings first.".into());
             return self.start_next();
         };
-        let diar_models = self.model_path(Role::DiarSegmentation).zip(self.model_path(Role::DiarEmbedding));
-        let llm_model = if self.settings.cleanup { self.model_path(Role::Llm) } else { None };
+        let diar_models = self
+            .model_path(Role::DiarSegmentation)
+            .zip(self.model_path(Role::DiarEmbedding));
+        let llm_model = if self.settings.cleanup {
+            self.model_path(Role::Llm)
+        } else {
+            None
+        };
         let out_dir = self.output_dir();
         let num_speakers = self.settings.num_speakers;
 
         let job = &mut self.jobs[idx];
-        job.about.speaker_names = job.names_text.split(',').map(|n| n.trim().to_string()).collect();
+        job.about.speaker_names = job
+            .names_text
+            .split(',')
+            .map(|n| n.trim().to_string())
+            .collect();
         job.state = JobState::Running;
         job.steps.clear();
         job.step = 0;
@@ -515,11 +577,29 @@ impl App {
         if self.downloading.contains_key(id) {
             return Task::none();
         }
-        let Some(entry) = self.registry.as_ref().ok().and_then(|r| r.get(id).ok()).cloned() else { return Task::none() };
+        let Some(entry) = self
+            .registry
+            .as_ref()
+            .ok()
+            .and_then(|r| r.get(id).ok())
+            .cloned()
+        else {
+            return Task::none();
+        };
         self.errors.remove(id);
-        self.downloading.insert(id.to_string(), Progress { done: 0, total: entry.size_bytes });
+        self.downloading.insert(
+            id.to_string(),
+            Progress {
+                done: 0,
+                total: entry.size_bytes,
+            },
+        );
         let id = id.to_string();
-        let stream = download_stream(entry, self.store.dir().to_path_buf(), std::env::var("HF_TOKEN").ok());
+        let stream = download_stream(
+            entry,
+            self.store.dir().to_path_buf(),
+            std::env::var("HF_TOKEN").ok(),
+        );
         Task::run(stream, move |ev| Message::DownloadUpdate(id.clone(), ev))
     }
 
@@ -536,10 +616,10 @@ impl App {
                 self.detection = d;
                 if let (Some(det), Ok(reg)) = (&self.detection, &self.registry) {
                     for role in ROLES {
-                        if !self.selection.contains_key(&role) {
-                            if let Some(m) = reg.recommend(role, Preset::Balanced, det) {
-                                self.selection.insert(role, m.id.clone());
-                            }
+                        if !self.selection.contains_key(&role)
+                            && let Some(m) = reg.recommend(role, Preset::Balanced, det)
+                        {
+                            self.selection.insert(role, m.id.clone());
                         }
                     }
                 }
@@ -547,13 +627,19 @@ impl App {
             }
             Message::Tick => {
                 self.spin = (self.epoch.elapsed().as_secs_f32() * 7.0) % std::f32::consts::TAU;
-                if self.copied.is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(1600)) {
+                if self
+                    .copied
+                    .is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(1600))
+                {
                     self.copied = None;
                 }
                 // the notice stays while it offers the ffmpeg download
                 if self.waiting_for_ffmpeg.is_empty()
                     && self.ffmpeg_dl.is_none()
-                    && self.notice.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(12))
+                    && self
+                        .notice
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(12))
                 {
                     self.notice = None;
                 }
@@ -568,7 +654,8 @@ impl App {
                 None => Task::none(),
             },
             Message::ToggleMaximize => match self.win {
-                Some(id) => window::toggle_maximize(id).chain(window::is_maximized(id).map(Message::Maximized)),
+                Some(id) => window::toggle_maximize(id)
+                    .chain(window::is_maximized(id).map(Message::Maximized)),
                 None => Task::none(),
             },
             Message::Maximized(m) => {
@@ -578,7 +665,14 @@ impl App {
             Message::ToggleFullscreen => match self.win {
                 Some(id) => {
                     self.fullscreen = !self.fullscreen;
-                    window::set_mode(id, if self.fullscreen { window::Mode::Fullscreen } else { window::Mode::Windowed })
+                    window::set_mode(
+                        id,
+                        if self.fullscreen {
+                            window::Mode::Fullscreen
+                        } else {
+                            window::Mode::Windowed
+                        },
+                    )
                 }
                 None => Task::none(),
             },
@@ -624,7 +718,10 @@ impl App {
             Message::AddFiles => Task::perform(pick_files(), Message::FilesPicked),
             Message::FilesPicked(files) => {
                 // anything that is not a readable video / audio file is ignored (see FilesChecked)
-                let files: Vec<PathBuf> = files.into_iter().filter(|f| !self.jobs.iter().any(|j| &j.path == f)).collect();
+                let files: Vec<PathBuf> = files
+                    .into_iter()
+                    .filter(|f| !self.jobs.iter().any(|j| &j.path == f))
+                    .collect();
                 if files.is_empty() {
                     return Task::none();
                 }
@@ -633,7 +730,10 @@ impl App {
             Message::FilesChecked(results) => {
                 let mut skipped: Vec<String> = Vec::new();
                 for (f, verdict) in results {
-                    let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.display().to_string());
+                    let name = f
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| f.display().to_string());
                     match verdict {
                         engine::audio::Probe::Ok => {
                             if self.jobs.iter().any(|j| j.path == f) {
@@ -656,7 +756,10 @@ impl App {
                                 cancelled: false,
                                 notes: Vec::new(),
                                 expanded: false,
-                                about: pipeline::About { category: "default".into(), ..Default::default() },
+                                about: pipeline::About {
+                                    category: "default".into(),
+                                    ..Default::default()
+                                },
                                 names_text: String::new(),
                                 transcript: None,
                                 outputs: Vec::new(),
@@ -669,7 +772,9 @@ impl App {
                                 self.waiting_for_ffmpeg.push(f);
                             }
                         }
-                        engine::audio::Probe::Invalid(why) => skipped.push(format!("{name}: {why}")),
+                        engine::audio::Probe::Invalid(why) => {
+                            skipped.push(format!("{name}: {why}"))
+                        }
                     }
                 }
                 if !skipped.is_empty() {
@@ -699,12 +804,20 @@ impl App {
             }
             Message::FfmpegUpdate(ev) => match ev {
                 FfmpegEvent::Downloading { done, total } => {
-                    self.ffmpeg_dl = Some(FfmpegProgress { done, total, unpacking: false });
+                    self.ffmpeg_dl = Some(FfmpegProgress {
+                        done,
+                        total,
+                        unpacking: false,
+                    });
                     Task::none()
                 }
                 FfmpegEvent::Unpacking => {
                     let (done, total) = self.ffmpeg_dl.map_or((0, 0), |p| (p.done, p.total));
-                    self.ffmpeg_dl = Some(FfmpegProgress { done, total, unpacking: true });
+                    self.ffmpeg_dl = Some(FfmpegProgress {
+                        done,
+                        total,
+                        unpacking: true,
+                    });
                     Task::none()
                 }
                 FfmpegEvent::Finished(Ok(_)) => {
@@ -713,7 +826,11 @@ impl App {
                     // add the files that were waiting for it
                     let files = std::mem::take(&mut self.waiting_for_ffmpeg);
                     self.notice = None;
-                    if files.is_empty() { Task::none() } else { Task::done(Message::FilesPicked(files)) }
+                    if files.is_empty() {
+                        Task::none()
+                    } else {
+                        Task::done(Message::FilesPicked(files))
+                    }
                 }
                 FfmpegEvent::Finished(Err(e)) => {
                     self.ffmpeg_dl = None;
@@ -799,7 +916,10 @@ impl App {
                             j.notes.push(n);
                         }
                     }
-                    pipeline::Event::Done { transcript, outputs } => {
+                    pipeline::Event::Done {
+                        transcript,
+                        outputs,
+                    } => {
                         if let Some(j) = self.job_mut(id) {
                             j.state = JobState::Done;
                             j.progress = 1.0;
@@ -816,7 +936,8 @@ impl App {
                                 was_cancelled = true;
                                 j.state = JobState::Waiting;
                                 j.cancelled = false;
-                                j.notes.push("Cancelled. Press Start to run it again.".into());
+                                j.notes
+                                    .push("Cancelled. Press Start to run it again.".into());
                             } else {
                                 j.state = JobState::Failed;
                                 j.error = Some(e);
@@ -835,8 +956,12 @@ impl App {
             Message::OpenJob(id) => {
                 if let Some(t) = self.job(id).and_then(|j| j.transcript.as_ref()) {
                     let names: Vec<String> = t.speakers.iter().map(|s| s.name.clone()).collect();
-                    let rows: Vec<text_editor::Content> =
-                        t.utterances.iter().take(PAGE).map(|u| text_editor::Content::with_text(&u.text)).collect();
+                    let rows: Vec<text_editor::Content> = t
+                        .utterances
+                        .iter()
+                        .take(PAGE)
+                        .map(|u| text_editor::Content::with_text(&u.text))
+                        .collect();
                     self.name_edits = names;
                     self.rows = rows;
                     self.copied = None;
@@ -856,7 +981,14 @@ impl App {
                     let more: Vec<text_editor::Content> = self
                         .job(id)
                         .and_then(|j| j.transcript.as_ref())
-                        .map(|t| t.utterances.iter().skip(have).take(self.shown.saturating_sub(have)).map(|u| text_editor::Content::with_text(&u.text)).collect())
+                        .map(|t| {
+                            t.utterances
+                                .iter()
+                                .skip(have)
+                                .take(self.shown.saturating_sub(have))
+                                .map(|u| text_editor::Content::with_text(&u.text))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     self.rows.extend(more);
                 }
@@ -864,18 +996,20 @@ impl App {
             }
             Message::RowAction(i, action) => {
                 // read-only: selecting and moving the caret are fine, typing and deleting are ignored
-                if !action.is_edit() {
-                    if let Some(c) = self.rows.get_mut(i) {
-                        c.perform(action);
-                    }
+                if !action.is_edit()
+                    && let Some(c) = self.rows.get_mut(i)
+                {
+                    c.perform(action);
                 }
                 Task::none()
             }
             Message::CopyRow(i) => {
                 let text = match self.page {
-                    Page::Transcript(id) => {
-                        self.job(id).and_then(|j| j.transcript.as_ref()).and_then(|t| t.utterances.get(i)).map(|u| u.text.clone())
-                    }
+                    Page::Transcript(id) => self
+                        .job(id)
+                        .and_then(|j| j.transcript.as_ref())
+                        .and_then(|t| t.utterances.get(i))
+                        .map(|u| u.text.clone()),
                     Page::Home => None,
                 };
                 match text {
@@ -887,12 +1021,20 @@ impl App {
                 }
             }
             Message::OpenFolder(id) => {
-                if let Some(dir) = self.job(id).and_then(|j| j.outputs.first()).and_then(|p| p.parent()) {
+                if let Some(dir) = self
+                    .job(id)
+                    .and_then(|j| j.outputs.first())
+                    .and_then(|p| p.parent())
+                {
                     pipeline::open_in_file_manager(dir);
                 }
                 Task::none()
             }
-            Message::CopyText(id) => match self.job(id).and_then(|j| j.transcript.as_ref()).map(|t| t.to_txt()) {
+            Message::CopyText(id) => match self
+                .job(id)
+                .and_then(|j| j.transcript.as_ref())
+                .map(|t| t.to_txt())
+            {
                 Some(text) => {
                     self.copied = Some((CopyTarget::All, Instant::now()));
                     iced::clipboard::write(text)
@@ -908,18 +1050,18 @@ impl App {
             Message::SaveNames => {
                 if let Page::Transcript(id) = self.page {
                     let edits = self.name_edits.clone();
-                    if let Some(j) = self.job_mut(id) {
-                        if let Some(t) = j.transcript.as_mut() {
-                            for (i, n) in edits.iter().enumerate() {
-                                if !n.trim().is_empty() {
-                                    t.rename_speaker(i, n);
-                                }
+                    if let Some(j) = self.job_mut(id)
+                        && let Some(t) = j.transcript.as_mut()
+                    {
+                        for (i, n) in edits.iter().enumerate() {
+                            if !n.trim().is_empty() {
+                                t.rename_speaker(i, n);
                             }
-                            if let Some(first) = j.outputs.first() {
-                                if let (Some(dir), Some(stem)) = (first.parent(), j.path.file_stem()) {
-                                    let _ = pipeline::write_outputs(t, dir, &stem.to_string_lossy());
-                                }
-                            }
+                        }
+                        if let Some(first) = j.outputs.first()
+                            && let (Some(dir), Some(stem)) = (first.parent(), j.path.file_stem())
+                        {
+                            let _ = pipeline::write_outputs(t, dir, &stem.to_string_lossy());
                         }
                     }
                 }
@@ -983,7 +1125,11 @@ impl App {
                     .selected_entries()
                     .into_iter()
                     .filter(|m| !matches!(self.store.status(m), Status::Present))
-                    .filter(|m| self.detection.as_ref().is_none_or(|d| !matches!(fit(m, d), Fit::TooBig | Fit::Unsupported)))
+                    .filter(|m| {
+                        self.detection
+                            .as_ref()
+                            .is_none_or(|d| !matches!(fit(m, d), Fit::TooBig | Fit::Unsupported))
+                    })
                     .map(|m| m.id.clone())
                     .collect();
                 Task::batch(ids.iter().map(|id| self.start_download(id)))
@@ -1012,23 +1158,35 @@ impl App {
         } else {
             Subscription::none()
         };
-        let tick = if self.is_loading() { Subscription::run(tick_stream).map(|_| Message::Tick) } else { Subscription::none() };
+        let tick = if self.is_loading() {
+            Subscription::run(tick_stream).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             usage,
             tick,
             iced::system::theme_changes().map(Message::SystemTheme),
             window::close_requests().map(|_| Message::CloseWindow),
             event::listen_with(|ev, _status, _id| match ev {
-                iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::FilesPicked(vec![path])),
-                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                iced::Event::Window(window::Event::FileDropped(path)) => {
+                    Some(Message::FilesPicked(vec![path]))
+                }
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key, modifiers, ..
+                }) => {
                     use iced::keyboard::{Key, key::Named};
                     match key.as_ref() {
                         Key::Named(Named::Escape) => Some(Message::CloseSettings),
                         Key::Named(Named::F11) => Some(Message::ToggleFullscreen),
                         // Cmd on macOS, Ctrl elsewhere
                         Key::Character(",") if modifiers.command() => Some(Message::OpenSettings),
-                        Key::Character("w") if MAC && modifiers.command() => Some(Message::CloseWindow),
-                        Key::Character("m") if MAC && modifiers.command() => Some(Message::Minimize),
+                        Key::Character("w") if MAC && modifiers.command() => {
+                            Some(Message::CloseWindow)
+                        }
+                        Key::Character("m") if MAC && modifiers.command() => {
+                            Some(Message::Minimize)
+                        }
                         _ => None,
                     }
                 }
@@ -1047,8 +1205,15 @@ impl App {
                 Page::Home => self.home_page(narrow),
                 Page::Transcript(id) => self.transcript_page(id),
             };
-            let divider = container(space::horizontal()).width(Length::Fixed(1.0)).height(Length::Fill).style(theme::divider(t));
-            let body: Element<'_, Message> = if narrow { content } else { row![self.sidebar(), divider, content].into() };
+            let divider = container(space::horizontal())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fill)
+                .style(theme::divider(t));
+            let body: Element<'_, Message> = if narrow {
+                content
+            } else {
+                row![self.sidebar(), divider, content].into()
+            };
             column![self.titlebar(narrow), body].into()
         })
         .into();
@@ -1056,26 +1221,25 @@ impl App {
         // our own frame only where we also draw the title strip (Windows / Linux, not maximized)
         let framed = !MAC && !self.maximized && !self.fullscreen;
         let radius = if framed { corner_radius() } else { 0.0 };
-        let mut layers: Vec<Element<'_, Message>> = vec![container(shell)
-            .padding(1)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::window_frame(t, framed, radius))
-            .into()];
+        let mut layers: Vec<Element<'_, Message>> = vec![
+            container(shell)
+                .padding(1)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::window_frame(t, framed, radius))
+                .into(),
+        ];
 
         if self.settings_open {
-            layers.push(
-                opaque(
-                    mouse_area(
-                        container(center(opaque(self.settings_dialog())).padding(24))
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .style(theme::scrim()),
-                    )
-                    .on_press(Message::CloseSettings),
+            layers.push(opaque(
+                mouse_area(
+                    container(center(opaque(self.settings_dialog())).padding(24))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(theme::scrim()),
                 )
-                .into(),
-            );
+                .on_press(Message::CloseSettings),
+            ));
         }
         // invisible handles on the window edges so the borderless window can still be resized
         if !MAC && !self.maximized && !self.fullscreen {
@@ -1089,9 +1253,13 @@ impl App {
     fn titlebar(&self, narrow: bool) -> Element<'_, Message> {
         let t = self.tokens;
         let height = if MAC { 40.0 } else { 36.0 };
-        let drag = mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fixed(height)))
-            .on_press(Message::DragWindow)
-            .on_double_click(Message::ToggleMaximize);
+        let drag = mouse_area(
+            container(space::horizontal())
+                .width(Length::Fill)
+                .height(Length::Fixed(height)),
+        )
+        .on_press(Message::DragWindow)
+        .on_double_click(Message::ToggleMaximize);
 
         let mut r = row![].align_y(Alignment::Center);
         if MAC {
@@ -1100,7 +1268,9 @@ impl App {
             r = r.push(
                 container(
                     row![
-                        svg(svg::Handle::from_memory(APP_ICON_SVG)).width(Length::Fixed(18.0)).height(Length::Fixed(18.0)),
+                        svg(svg::Handle::from_memory(APP_ICON_SVG))
+                            .width(Length::Fixed(18.0))
+                            .height(Length::Fixed(18.0)),
                         text(APP_NAME).size(13).font(semibold()).color(t.muted),
                     ]
                     .spacing(9)
@@ -1113,14 +1283,19 @@ impl App {
         r = r.push(drag);
         if narrow {
             r = r.push(
-                button(icons::icon(icons::SLIDERS, 17.0, t.text)).padding([7, 9]).style(theme::ghost(t)).on_press(Message::OpenSettings),
+                button(icons::icon(icons::SLIDERS, 17.0, t.text))
+                    .padding([7, 9])
+                    .style(theme::ghost(t))
+                    .on_press(Message::OpenSettings),
             );
             r = r.push(space::horizontal().width(Length::Fixed(6.0)));
         }
         if !MAC {
             let win_btn = |icon: &'static str, msg: Message, close: bool| -> Element<'_, Message> {
                 button(
-                    container(icons::icon(icon, 10.0, t.text)).center_x(Length::Fixed(46.0)).center_y(Length::Fixed(height)),
+                    container(icons::icon(icon, 10.0, t.text))
+                        .center_x(Length::Fixed(46.0))
+                        .center_y(Length::Fixed(height)),
                 )
                 .padding(0)
                 .style(theme::win_button(t, close))
@@ -1129,10 +1304,22 @@ impl App {
             };
             r = r
                 .push(win_btn(icons::WIN_MINIMIZE, Message::Minimize, false))
-                .push(win_btn(if self.maximized { icons::WIN_RESTORE } else { icons::WIN_MAXIMIZE }, Message::ToggleMaximize, false))
+                .push(win_btn(
+                    if self.maximized {
+                        icons::WIN_RESTORE
+                    } else {
+                        icons::WIN_MAXIMIZE
+                    },
+                    Message::ToggleMaximize,
+                    false,
+                ))
                 .push(win_btn(icons::WIN_CLOSE, Message::CloseWindow, true));
         }
-        container(r).width(Length::Fill).height(Length::Fixed(height)).style(theme::strip(t)).into()
+        container(r)
+            .width(Length::Fill)
+            .height(Length::Fixed(height))
+            .style(theme::strip(t))
+            .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -1140,21 +1327,31 @@ impl App {
         let hw_inner: Element<'_, Message> = match &self.detection {
             None => row![
                 self.spinner(16.0, t.muted),
-                column![text("Detecting hardware").size(12).color(t.muted), self.skeleton(Length::Fixed(84.0), 8.0)].spacing(5),
+                column![
+                    text("Detecting hardware").size(12).color(t.muted),
+                    self.skeleton(Length::Fixed(84.0), 8.0)
+                ]
+                .spacing(5),
             ]
             .spacing(10)
             .align_y(Alignment::Center)
             .into(),
             Some(d) => {
-                let gpu = d
-                    .recommended_gpu
-                    .and_then(|i| d.gpus.get(i))
-                    .map(|g| g.name.replace("NVIDIA GeForce ", "").replace(" Laptop GPU", ""));
+                let gpu = d.recommended_gpu.and_then(|i| d.gpus.get(i)).map(|g| {
+                    g.name
+                        .replace("NVIDIA GeForce ", "")
+                        .replace(" Laptop GPU", "")
+                });
                 row![
                     icons::icon(icons::CPU, 18.0, t.muted),
                     column![
-                        text(d.recommended.as_str().to_uppercase()).size(12).font(semibold()).color(t.text),
-                        text(gpu.unwrap_or_else(|| "No GPU found".into())).size(12).color(t.muted),
+                        text(d.recommended.as_str().to_uppercase())
+                            .size(12)
+                            .font(semibold())
+                            .color(t.text),
+                        text(gpu.unwrap_or_else(|| "No GPU found".into()))
+                            .size(12)
+                            .color(t.muted),
                     ]
                     .spacing(1),
                 ]
@@ -1163,22 +1360,42 @@ impl App {
                 .into()
             }
         };
-        let hw = container(hw_inner).padding(12).width(Length::Fill).style(theme::card(t));
+        let hw = container(hw_inner)
+            .padding(12)
+            .width(Length::Fill)
+            .style(theme::card(t));
 
         container(
             column![
-                nav_button(t, icons::FILE_TEXT, "Transcripts", !self.settings_open, Message::Back),
-                nav_button(t, icons::SLIDERS, "Settings", self.settings_open, Message::OpenSettings),
+                nav_button(
+                    t,
+                    icons::FILE_TEXT,
+                    "Transcripts",
+                    !self.settings_open,
+                    Message::Back
+                ),
+                nav_button(
+                    t,
+                    icons::SLIDERS,
+                    "Settings",
+                    self.settings_open,
+                    Message::OpenSettings
+                ),
                 space::vertical(),
                 hw,
-                text(format!("Version {VERSION}  -  English")).size(11).color(t.faint),
+                text(format!("Version {VERSION}  -  English"))
+                    .size(11)
+                    .color(t.faint),
             ]
             .spacing(6)
             .padding([8, 16]),
         )
         .width(Length::Fixed(243.0))
         .height(Length::Fill)
-        .style(theme::sidebar(t, corner_radius() > 0.0 && !self.maximized && !self.fullscreen))
+        .style(theme::sidebar(
+            t,
+            corner_radius() > 0.0 && !self.maximized && !self.fullscreen,
+        ))
         .into()
     }
 
@@ -1186,7 +1403,11 @@ impl App {
 
     fn home_page(&self, narrow: bool) -> Element<'_, Message> {
         let t = self.tokens;
-        let waiting = self.jobs.iter().filter(|j| matches!(j.state, JobState::Waiting | JobState::Failed)).count();
+        let waiting = self
+            .jobs
+            .iter()
+            .filter(|j| matches!(j.state, JobState::Waiting | JobState::Failed))
+            .count();
         let can_start = waiting > 0 && self.running.is_none() && self.can_transcribe();
 
         let start_label = if self.running.is_some() {
@@ -1197,14 +1418,28 @@ impl App {
             "Start".to_string()
         };
         let actions = row![
-            button(row![icons::icon(icons::PLUS, 16.0, t.text), text("Add files").size(14)].spacing(8).align_y(Alignment::Center))
-                .padding([9, 14])
-                .style(theme::outline_btn(t))
-                .on_press(Message::AddFiles),
             button(
-                row![icons::icon(icons::PLAY, 15.0, if can_start { t.on_accent } else { t.faint }), text(start_label).size(14)]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
+                row![
+                    icons::icon(icons::PLUS, 16.0, t.text),
+                    text("Add files").size(14)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+            )
+            .padding([9, 14])
+            .style(theme::outline_btn(t))
+            .on_press(Message::AddFiles),
+            button(
+                row![
+                    icons::icon(
+                        icons::PLAY,
+                        15.0,
+                        if can_start { t.on_accent } else { t.faint }
+                    ),
+                    text(start_label).size(14)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
             )
             .padding([9, 16])
             .style(theme::primary(t))
@@ -1224,17 +1459,24 @@ impl App {
         let header: Element<'_, Message> = if narrow {
             column![title, actions].spacing(12).into()
         } else {
-            row![title, actions].spacing(16).align_y(Alignment::Center).into()
+            row![title, actions]
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .into()
         };
 
         let mut page = column![header].spacing(18);
 
         if let Some((lines, _)) = &self.notice {
             let mut list = column![
-                text(if lines.len() == 1 { "1 file was not added".to_string() } else { format!("{} files were not added", lines.len()) })
-                    .size(14)
-                    .font(semibold())
-                    .color(t.text),
+                text(if lines.len() == 1 {
+                    "1 file was not added".to_string()
+                } else {
+                    format!("{} files were not added", lines.len())
+                })
+                .size(14)
+                .font(semibold())
+                .color(t.text),
             ]
             .spacing(3)
             .width(Length::Fill);
@@ -1242,14 +1484,19 @@ impl App {
                 list = list.push(text(l.clone()).size(12).color(t.muted));
             }
             if !self.waiting_for_ffmpeg.is_empty() {
-                list = list.push(space::vertical().height(Length::Fixed(6.0))).push(self.ffmpeg_offer());
+                list = list
+                    .push(space::vertical().height(Length::Fixed(6.0)))
+                    .push(self.ffmpeg_offer());
             }
             page = page.push(
                 container(
                     row![
                         icons::icon(icons::ALERT, 20.0, t.warn),
                         list,
-                        button(icons::icon(icons::X, 14.0, t.muted)).padding(6).style(theme::ghost(t)).on_press(Message::DismissNotice),
+                        button(icons::icon(icons::X, 14.0, t.muted))
+                            .padding(6)
+                            .style(theme::ghost(t))
+                            .on_press(Message::DismissNotice),
                     ]
                     .spacing(12)
                     .align_y(Alignment::Start),
@@ -1292,10 +1539,14 @@ impl App {
             }
         }
 
-        scrollable(container(page).padding(if narrow { 16 } else { 28 }).max_width(980))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        scrollable(
+            container(page)
+                .padding(if narrow { 16 } else { 28 })
+                .max_width(980),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn empty_state(&self) -> Element<'_, Message> {
@@ -1326,41 +1577,84 @@ impl App {
     fn job_card<'a>(&'a self, j: &'a Job) -> Element<'a, Message> {
         let t = self.tokens;
         let id = j.id;
-        let name = j.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let folder = j.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let name = j
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let folder = j
+            .path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         let meta = format!("{}  -  {}", human(j.size), folder);
 
         let (label, color) = match j.state {
             JobState::Waiting => ("Waiting".to_string(), t.muted),
-            JobState::Running => (j.steps.get(j.step).cloned().unwrap_or_else(|| "Working".to_string()), t.accent),
+            JobState::Running => (
+                j.steps
+                    .get(j.step)
+                    .cloned()
+                    .unwrap_or_else(|| "Working".to_string()),
+                t.accent,
+            ),
             JobState::Done => ("Done".to_string(), t.ok),
             JobState::Failed => ("Failed".to_string(), t.bad),
         };
 
         let mut head = row![
-            container(icons::icon(if is_audio_file(&j.path) { icons::AUDIO } else { icons::VIDEO }, 20.0, t.accent))
-                .center_x(Length::Fixed(42.0))
-                .center_y(Length::Fixed(42.0))
-                .style(theme::rounded_fill(theme::with_alpha(t.accent, 0.12), theme::RADIUS_S)),
-            column![text(name).size(15).font(semibold()).color(t.text), text(meta).size(12).color(t.muted)]
-                .spacing(2)
-                .width(Length::Fill),
-            container(text(label).size(12).color(color)).padding([4, 10]).style(theme::chip(color)),
+            container(icons::icon(
+                if is_audio_file(&j.path) {
+                    icons::AUDIO
+                } else {
+                    icons::VIDEO
+                },
+                20.0,
+                t.accent
+            ))
+            .center_x(Length::Fixed(42.0))
+            .center_y(Length::Fixed(42.0))
+            .style(theme::rounded_fill(
+                theme::with_alpha(t.accent, 0.12),
+                theme::RADIUS_S
+            )),
+            column![
+                text(name).size(15).font(semibold()).color(t.text),
+                text(meta).size(12).color(t.muted)
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            container(text(label).size(12).color(color))
+                .padding([4, 10])
+                .style(theme::chip(color)),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
 
         if matches!(j.state, JobState::Waiting | JobState::Failed) {
-            let chevron = if j.expanded { icons::CHEVRON_UP } else { icons::CHEVRON_DOWN };
+            let chevron = if j.expanded {
+                icons::CHEVRON_UP
+            } else {
+                icons::CHEVRON_DOWN
+            };
             head = head.push(
-                button(row![icons::icon(chevron, 14.0, t.muted), text("About").size(13)].spacing(6).align_y(Alignment::Center))
-                    .padding([6, 10])
-                    .style(theme::ghost(t))
-                    .on_press(Message::ToggleDetails(id)),
+                button(
+                    row![icons::icon(chevron, 14.0, t.muted), text("About").size(13)]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                )
+                .padding([6, 10])
+                .style(theme::ghost(t))
+                .on_press(Message::ToggleDetails(id)),
             );
         }
         if self.running != Some(id) {
-            head = head.push(button(icons::icon(icons::X, 15.0, t.muted)).padding(7).style(theme::ghost(t)).on_press(Message::Remove(id)));
+            head = head.push(
+                button(icons::icon(icons::X, 15.0, t.muted))
+                    .padding(7)
+                    .style(theme::ghost(t))
+                    .on_press(Message::Remove(id)),
+            );
         }
 
         let mut body = column![head].spacing(12);
@@ -1375,22 +1669,38 @@ impl App {
                 }
             }
             JobState::Done => {
-                let speakers = j
-                    .transcript
-                    .as_ref()
-                    .map_or(0, |tr| tr.utterances.iter().map(|u| u.speaker).collect::<std::collections::BTreeSet<_>>().len());
+                let speakers = j.transcript.as_ref().map_or(0, |tr| {
+                    tr.utterances
+                        .iter()
+                        .map(|u| u.speaker)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                });
                 let count = j.transcript.as_ref().map_or(0, |tr| tr.utterances.len());
                 body = body.push(
                     row![
-                        text(format!("{count} turns  -  {speakers} speaker(s)")).size(13).color(t.muted).width(Length::Fill),
-                        button(row![icons::icon(icons::FOLDER, 15.0, t.text), text("Open folder").size(13)].spacing(6).align_y(Alignment::Center))
-                            .padding([7, 12])
-                            .style(theme::outline_btn(t))
-                            .on_press(Message::OpenFolder(id)),
+                        text(format!("{count} turns  -  {speakers} speaker(s)"))
+                            .size(13)
+                            .color(t.muted)
+                            .width(Length::Fill),
                         button(
-                            row![icons::icon(icons::FILE_TEXT, 15.0, t.on_accent), text("View transcript").size(13)]
-                                .spacing(6)
-                                .align_y(Alignment::Center)
+                            row![
+                                icons::icon(icons::FOLDER, 15.0, t.text),
+                                text("Open folder").size(13)
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center)
+                        )
+                        .padding([7, 12])
+                        .style(theme::outline_btn(t))
+                        .on_press(Message::OpenFolder(id)),
+                        button(
+                            row![
+                                icons::icon(icons::FILE_TEXT, 15.0, t.on_accent),
+                                text("View transcript").size(13)
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center)
                         )
                         .padding([7, 12])
                         .style(theme::primary(t))
@@ -1404,11 +1714,23 @@ impl App {
         }
 
         for n in &j.notes {
-            body = body.push(row![icons::icon(icons::ALERT, 13.0, t.warn), text(n.clone()).size(12).color(t.muted)].spacing(6));
+            body = body.push(
+                row![
+                    icons::icon(icons::ALERT, 13.0, t.warn),
+                    text(n.clone()).size(12).color(t.muted)
+                ]
+                .spacing(6),
+            );
         }
 
         if j.expanded && matches!(j.state, JobState::Waiting | JobState::Failed) {
-            let cats: Vec<Choice> = CATEGORIES.iter().map(|(s, n)| Choice { id: s.to_string(), label: n.to_string() }).collect();
+            let cats: Vec<Choice> = CATEGORIES
+                .iter()
+                .map(|(s, n)| Choice {
+                    id: s.to_string(),
+                    label: n.to_string(),
+                })
+                .collect();
             let selected = cats.iter().find(|c| c.id == j.about.category).cloned();
             body = body.push(
                 container(
@@ -1446,14 +1768,22 @@ impl App {
             );
         }
 
-        container(body).padding(16).width(Length::Fill).style(theme::card(t)).into()
+        container(body)
+            .padding(16)
+            .width(Length::Fill)
+            .style(theme::card(t))
+            .into()
     }
 
     /// Numbered steps, the current step's own progress bar, what it is doing, and time / system usage.
     fn running_panel<'a>(&'a self, j: &'a Job) -> Element<'a, Message> {
         let t = self.tokens;
         let total = j.steps.len().max(1);
-        let current = j.steps.get(j.step).cloned().unwrap_or_else(|| "Working".into());
+        let current = j
+            .steps
+            .get(j.step)
+            .cloned()
+            .unwrap_or_else(|| "Working".into());
 
         let mut items: Vec<Element<'a, Message>> = Vec::new();
         for (i, name) in j.steps.iter().enumerate() {
@@ -1464,11 +1794,16 @@ impl App {
                     .style(theme::disc(theme::with_alpha(t.ok, 0.18)))
                     .into()
             } else if i == j.step {
-                container(text((i + 1).to_string()).size(12).font(semibold()).color(t.on_accent))
-                    .center_x(Length::Fixed(22.0))
-                    .center_y(Length::Fixed(22.0))
-                    .style(theme::disc(t.accent))
-                    .into()
+                container(
+                    text((i + 1).to_string())
+                        .size(12)
+                        .font(semibold())
+                        .color(t.on_accent),
+                )
+                .center_x(Length::Fixed(22.0))
+                .center_y(Length::Fixed(22.0))
+                .style(theme::disc(t.accent))
+                .into()
             } else {
                 container(text((i + 1).to_string()).size(12).color(t.faint))
                     .center_x(Length::Fixed(22.0))
@@ -1476,23 +1811,46 @@ impl App {
                     .style(theme::ring(t.faint))
                     .into()
             };
-            let label_color = if i == j.step { t.text } else if i < j.step { t.muted } else { t.faint };
-            items.push(row![badge, text(name.clone()).size(13).color(label_color)].spacing(8).align_y(Alignment::Center).into());
+            let label_color = if i == j.step {
+                t.text
+            } else if i < j.step {
+                t.muted
+            } else {
+                t.faint
+            };
+            items.push(
+                row![badge, text(name.clone()).size(13).color(label_color)]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into(),
+            );
             if i + 1 < total {
                 items.push(
                     container(space::horizontal())
                         .width(Length::Fixed(26.0))
                         .height(Length::Fixed(1.0))
-                        .style(theme::rounded_fill(if i < j.step { t.ok } else { t.rule }, 1.0))
+                        .style(theme::rounded_fill(
+                            if i < j.step { t.ok } else { t.rule },
+                            1.0,
+                        ))
                         .into(),
                 );
             }
         }
-        let stepper = row(items).spacing(8).align_y(Alignment::Center).wrap().vertical_spacing(8);
+        let stepper = row(items)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap()
+            .vertical_spacing(8);
 
         let elapsed = j.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-        let eta = (j.progress > 0.04 && j.progress < 1.0).then(|| (elapsed as f32 * (1.0 - j.progress) / j.progress) as u64);
-        let mut meta = format!("Overall {:.0}%  -  {} elapsed", j.progress * 100.0, mmss(elapsed));
+        let eta = (j.progress > 0.04 && j.progress < 1.0)
+            .then(|| (elapsed as f32 * (1.0 - j.progress) / j.progress) as u64);
+        let mut meta = format!(
+            "Overall {:.0}%  -  {} elapsed",
+            j.progress * 100.0,
+            mmss(elapsed)
+        );
         if let Some(e) = eta {
             meta.push_str(&format!("  -  about {} left", mmss(e)));
         }
@@ -1500,25 +1858,62 @@ impl App {
         let mut col = column![
             stepper,
             row![
-                text(format!("Step {} of {}  -  {}", (j.step + 1).min(total), total, current)).size(14).font(semibold()).color(t.text).width(Length::Fill),
-                text(format!("{:.0}%", j.step_progress * 100.0)).size(14).font(semibold()).color(t.accent),
-                button(row![icons::icon(icons::X, 12.0, t.muted), text("Cancel").size(12)].spacing(5).align_y(Alignment::Center))
-                    .padding([4, 9])
-                    .style(theme::ghost(t))
-                    .on_press(Message::Cancel(j.id)),
+                text(format!(
+                    "Step {} of {}  -  {}",
+                    (j.step + 1).min(total),
+                    total,
+                    current
+                ))
+                .size(14)
+                .font(semibold())
+                .color(t.text)
+                .width(Length::Fill),
+                text(format!("{:.0}%", j.step_progress * 100.0))
+                    .size(14)
+                    .font(semibold())
+                    .color(t.accent),
+                button(
+                    row![
+                        icons::icon(icons::X, 12.0, t.muted),
+                        text("Cancel").size(12)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
+                )
+                .padding([4, 9])
+                .style(theme::ghost(t))
+                .on_press(Message::Cancel(j.id)),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
-            progress_bar(0.0..=1.0, j.step_progress).length(Length::Fill).girth(8).style(theme::bar(t)),
+            progress_bar(0.0..=1.0, j.step_progress)
+                .length(Length::Fill)
+                .girth(8)
+                .style(theme::bar(t)),
         ]
         .spacing(10);
-        let detail = if j.detail.is_empty() { "Working...".to_string() } else { j.detail.clone() };
-        col = col.push(row![self.spinner(14.0, t.accent), text(detail).size(13).color(t.muted)].spacing(8).align_y(Alignment::Center));
+        let detail = if j.detail.is_empty() {
+            "Working...".to_string()
+        } else {
+            j.detail.clone()
+        };
+        col = col.push(
+            row![
+                self.spinner(14.0, t.accent),
+                text(detail).size(13).color(t.muted)
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
         col = col.push(text(meta).size(12).color(t.faint));
         if let Some(u) = &self.usage {
             col = col.push(text(u.summary()).size(12).color(t.faint));
         }
-        container(col).padding(14).width(Length::Fill).style(theme::bubble(t)).into()
+        container(col)
+            .padding(14)
+            .width(Length::Fill)
+            .style(theme::bubble(t))
+            .into()
     }
 
     /// "This computer": which GPU / backend is used, plus live CPU / memory / GPU readings.
@@ -1526,18 +1921,31 @@ impl App {
     fn system_section(&self) -> Element<'_, Message> {
         let t = self.tokens;
         let hardware: Element<'_, Message> = match &self.detection {
-            None => row![self.spinner(18.0, t.accent), text("Detecting your hardware...").size(14).color(t.muted)]
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .into(),
+            None => row![
+                self.spinner(18.0, t.accent),
+                text("Detecting your hardware...").size(14).color(t.muted)
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
             Some(d) => {
                 let gpu = d.recommended_gpu.and_then(|i| d.gpus.get(i));
                 row![
-                    container(text(d.recommended.as_str().to_uppercase()).size(13).font(semibold()).color(t.accent))
-                        .padding([5, 12])
-                        .style(theme::chip(t.accent)),
+                    container(
+                        text(d.recommended.as_str().to_uppercase())
+                            .size(13)
+                            .font(semibold())
+                            .color(t.accent)
+                    )
+                    .padding([5, 12])
+                    .style(theme::chip(t.accent)),
                     column![
-                        text(gpu.map(|g| g.name.clone()).unwrap_or_else(|| "No GPU found - using the CPU".into())).size(14).color(t.text),
+                        text(
+                            gpu.map(|g| g.name.clone())
+                                .unwrap_or_else(|| "No GPU found - using the CPU".into())
+                        )
+                        .size(14)
+                        .color(t.text),
                         text(
                             gpu.and_then(|g| g.vram_mb)
                                 .map(|m| format!("{:.1} GB video memory", m as f64 / 1024.0))
@@ -1568,18 +1976,32 @@ impl App {
                 "This computer",
                 column![
                     hardware,
-                    row![self.spinner(14.0, t.accent), text("Measuring usage...").size(12).color(t.muted)].spacing(8).align_y(Alignment::Center),
+                    row![
+                        self.spinner(14.0, t.accent),
+                        text("Measuring usage...").size(12).color(t.muted)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                     placeholders,
                 ]
                 .spacing(14)
                 .into(),
             );
         };
-        let ram_frac = if u.ram_total > 0 { u.ram_used as f32 / u.ram_total as f32 } else { 0.0 };
+        let ram_frac = if u.ram_total > 0 {
+            u.ram_used as f32 / u.ram_total as f32
+        } else {
+            0.0
+        };
         let mut col = column![
             hardware,
             meter(t, "Processor", u.cpu / 100.0, format!("{:.0}%", u.cpu)),
-            meter(t, "Memory (RAM)", ram_frac, format!("{} / {}", human(u.ram_used), human(u.ram_total))),
+            meter(
+                t,
+                "Memory (RAM)",
+                ram_frac,
+                format!("{} / {}", human(u.ram_used), human(u.ram_total))
+            ),
         ]
         .spacing(12);
         match (u.gpu.gpu_percent, u.gpu.vram_used_mb, u.gpu.vram_total_mb) {
@@ -1589,12 +2011,20 @@ impl App {
                     .push(meter(
                         t,
                         "Video memory",
-                        if total > 0 { used as f32 / total as f32 } else { 0.0 },
+                        if total > 0 {
+                            used as f32 / total as f32
+                        } else {
+                            0.0
+                        },
                         format!("{} / {}", human(used << 20), human(total << 20)),
                     ));
             }
             _ => {
-                col = col.push(text("Graphics card usage is not available for this GPU.").size(12).color(t.muted));
+                col = col.push(
+                    text("Graphics card usage is not available for this GPU.")
+                        .size(12)
+                        .color(t.muted),
+                );
             }
         }
         section(t, "This computer", col.into())
@@ -1604,20 +2034,35 @@ impl App {
 
     fn transcript_page(&self, id: u64) -> Element<'_, Message> {
         let t = self.tokens;
-        let Some(j) = self.job(id) else { return text("Transcript not found").into() };
-        let Some(tr) = j.transcript.as_ref() else { return text("Transcript not found").into() };
-        let name = j.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(j) = self.job(id) else {
+            return text("Transcript not found").into();
+        };
+        let Some(tr) = j.transcript.as_ref() else {
+            return text("Transcript not found").into();
+        };
+        let name = j
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let copied_all = matches!(self.copied, Some((CopyTarget::All, _)));
 
         let header = row![
-            button(icons::icon(icons::ARROW_LEFT, 18.0, t.text)).padding(9).style(theme::outline_btn(t)).on_press(Message::Back),
+            button(icons::icon(icons::ARROW_LEFT, 18.0, t.text))
+                .padding(9)
+                .style(theme::outline_btn(t))
+                .on_press(Message::Back),
             column![
                 text(name).size(20).font(semibold()).color(t.text),
                 text(format!(
                     "{}  -  {} turns  -  text {}",
                     clock(tr.audio_seconds),
                     tr.utterances.len(),
-                    if tr.refined { "cleaned up by AI" } else { "as heard" }
+                    if tr.refined {
+                        "cleaned up by AI"
+                    } else {
+                        "as heard"
+                    }
                 ))
                 .size(12)
                 .color(t.muted),
@@ -1626,7 +2071,15 @@ impl App {
             .width(Length::Fill),
             button(
                 row![
-                    icons::icon(if copied_all { icons::CHECK } else { icons::COPY }, 15.0, if copied_all { t.ok } else { t.text }),
+                    icons::icon(
+                        if copied_all {
+                            icons::CHECK
+                        } else {
+                            icons::COPY
+                        },
+                        15.0,
+                        if copied_all { t.ok } else { t.text }
+                    ),
                     text(if copied_all { "Copied" } else { "Copy all" }).size(13)
                 ]
                 .spacing(6)
@@ -1635,10 +2088,17 @@ impl App {
             .padding([8, 12])
             .style(theme::outline_btn(t))
             .on_press(Message::CopyText(id)),
-            button(row![icons::icon(icons::FOLDER, 15.0, t.on_accent), text("Open folder").size(13)].spacing(6).align_y(Alignment::Center))
-                .padding([8, 12])
-                .style(theme::primary(t))
-                .on_press(Message::OpenFolder(id)),
+            button(
+                row![
+                    icons::icon(icons::FOLDER, 15.0, t.on_accent),
+                    text("Open folder").size(13)
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+            )
+            .padding([8, 12])
+            .style(theme::primary(t))
+            .on_press(Message::OpenFolder(id)),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -1649,25 +2109,39 @@ impl App {
             let c = t.speaker(i);
             name_items.push(
                 row![
-                    container(text("").size(1)).width(Length::Fixed(10.0)).height(Length::Fixed(10.0)).style(theme::disc(c)),
-                    text_input(&s.name, self.name_edits.get(i).map(String::as_str).unwrap_or(""))
-                        .on_input(move |v| Message::RenameSpeaker(i, v))
-                        .style(theme::input(t))
-                        .padding(7)
-                        .width(Length::Fixed(150.0)),
+                    container(text("").size(1))
+                        .width(Length::Fixed(10.0))
+                        .height(Length::Fixed(10.0))
+                        .style(theme::disc(c)),
+                    text_input(
+                        &s.name,
+                        self.name_edits.get(i).map(String::as_str).unwrap_or("")
+                    )
+                    .on_input(move |v| Message::RenameSpeaker(i, v))
+                    .style(theme::input(t))
+                    .padding(7)
+                    .width(Length::Fixed(150.0)),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center)
                 .into(),
             );
         }
-        let names = row(name_items).spacing(10).align_y(Alignment::Center).wrap();
+        let names = row(name_items)
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .wrap();
         let legend = row![
             text("Speakers").size(12).color(t.muted),
             names,
-            button(text("Save names").size(12)).padding([6, 10]).style(theme::outline_btn(t)).on_press(Message::SaveNames),
+            button(text("Save names").size(12))
+                .padding([6, 10])
+                .style(theme::outline_btn(t))
+                .on_press(Message::SaveNames),
             space::horizontal(),
-            text("Select text with the mouse, then Ctrl+C. Also saved as .txt  .srt  .vtt  .json").size(12).color(t.faint),
+            text("Select text with the mouse, then Ctrl+C. Also saved as .txt  .srt  .vtt  .json")
+                .size(12)
+                .color(t.faint),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
@@ -1676,7 +2150,11 @@ impl App {
         for (i, u) in tr.utterances.iter().enumerate().take(self.shown) {
             let c = t.speaker(u.speaker);
             let who = tr.speaker_name(u.speaker);
-            let initial = who.chars().next().map(|ch| ch.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+            let initial = who
+                .chars()
+                .next()
+                .map(|ch| ch.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".into());
             let copied_here = matches!(self.copied, Some((CopyTarget::Row(r), _)) if r == i);
             // the message text: selectable (mouse drag, double-click a word, Ctrl+C)
             let body: Element<'_, Message> = match self.rows.get(i) {
@@ -1701,8 +2179,18 @@ impl App {
                             space::horizontal(),
                             button(
                                 row![
-                                    icons::icon(if copied_here { icons::CHECK } else { icons::COPY }, 13.0, if copied_here { t.ok } else { t.muted }),
-                                    text(if copied_here { "Copied" } else { "Copy" }).size(12).color(if copied_here { t.ok } else { t.muted }),
+                                    icons::icon(
+                                        if copied_here {
+                                            icons::CHECK
+                                        } else {
+                                            icons::COPY
+                                        },
+                                        13.0,
+                                        if copied_here { t.ok } else { t.muted }
+                                    ),
+                                    text(if copied_here { "Copied" } else { "Copy" })
+                                        .size(12)
+                                        .color(if copied_here { t.ok } else { t.muted }),
                                 ]
                                 .spacing(5)
                                 .align_y(Alignment::Center)
@@ -1713,7 +2201,10 @@ impl App {
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
-                        container(body).padding([10, 14]).width(Length::Fill).style(theme::bubble(t)),
+                        container(body)
+                            .padding([10, 14])
+                            .width(Length::Fill)
+                            .style(theme::bubble(t)),
                     ]
                     .spacing(4)
                     .width(Length::Fill),
@@ -1723,16 +2214,27 @@ impl App {
         }
         if tr.utterances.len() > self.shown {
             list = list.push(
-                button(text(format!("Show more ({} left)", tr.utterances.len() - self.shown)).size(13))
-                    .padding([9, 16])
-                    .style(theme::outline_btn(t))
-                    .on_press(Message::MoreRows),
+                button(
+                    text(format!(
+                        "Show more ({} left)",
+                        tr.utterances.len() - self.shown
+                    ))
+                    .size(13),
+                )
+                .padding([9, 16])
+                .style(theme::outline_btn(t))
+                .on_press(Message::MoreRows),
             );
         }
 
         column![
-            container(column![header, legend].spacing(14)).padding([18, 28]).width(Length::Fill).style(theme::panel(t)),
-            scrollable(container(list).padding([20, 28]).max_width(920)).width(Length::Fill).height(Length::Fill),
+            container(column![header, legend].spacing(14))
+                .padding([18, 28])
+                .width(Length::Fill)
+                .style(theme::panel(t)),
+            scrollable(container(list).padding([20, 28]).max_width(920))
+                .width(Length::Fill)
+                .height(Length::Fill),
         ]
         .into()
     }
@@ -1748,8 +2250,17 @@ impl App {
                 .style(theme::segment(t, self.settings.theme == value))
                 .on_press(Message::SetTheme(value.into()))
         };
-        let appearance =
-            section(t, "Appearance", row![seg("System", "system"), seg("Light", "light"), seg("Dark", "dark")].spacing(8).into());
+        let appearance = section(
+            t,
+            "Appearance",
+            row![
+                seg("System", "system"),
+                seg("Light", "light"),
+                seg("Dark", "dark")
+            ]
+            .spacing(8)
+            .into(),
+        );
 
         let out = self.output_dir();
         let folder = section(
@@ -1758,11 +2269,19 @@ impl App {
             column![
                 text(out.display().to_string()).size(13).color(t.muted),
                 row![
-                    button(text("Change...").size(13)).padding([7, 12]).style(theme::outline_btn(t)).on_press(Message::ChooseOutput),
+                    button(text("Change...").size(13))
+                        .padding([7, 12])
+                        .style(theme::outline_btn(t))
+                        .on_press(Message::ChooseOutput),
                     button(text("Use default").size(13))
                         .padding([7, 12])
                         .style(theme::ghost(t))
-                        .on_press_maybe(self.settings.output_dir.is_some().then_some(Message::ResetOutput)),
+                        .on_press_maybe(
+                            self.settings
+                                .output_dir
+                                .is_some()
+                                .then_some(Message::ResetOutput)
+                        ),
                 ]
                 .spacing(8),
             ]
@@ -1792,7 +2311,9 @@ impl App {
             icons::icon(icons::SPARKLES, 18.0, t.accent),
             column![
                 text("Clean up text with AI").size(14).color(t.text),
-                text("Fixes misheard words and punctuation. Slower; needs the cleanup model.").size(12).color(t.muted)
+                text("Fixes misheard words and punctuation. Slower; needs the cleanup model.")
+                    .size(12)
+                    .color(t.muted)
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -1800,16 +2321,32 @@ impl App {
         ]
         .align_y(Alignment::Center)
         .spacing(12);
-        let processing = section(t, "Processing", column![speakers_row, cleanup_row].spacing(16).into());
+        let processing = section(
+            t,
+            "Processing",
+            column![speakers_row, cleanup_row].spacing(16).into(),
+        );
 
-        let body = column![self.system_section(), appearance, folder, processing, self.formats_section(), self.models_section()].spacing(14).padding([0, 22]);
+        let body = column![
+            self.system_section(),
+            appearance,
+            folder,
+            processing,
+            self.formats_section(),
+            self.models_section()
+        ]
+        .spacing(14)
+        .padding([0, 22]);
 
         container(
             column![
                 row![
                     text("Settings").size(22).font(semibold()).color(t.text),
                     space::horizontal(),
-                    button(icons::icon(icons::X, 16.0, t.text)).padding(8).style(theme::ghost(t)).on_press(Message::CloseSettings),
+                    button(icons::icon(icons::X, 16.0, t.text))
+                        .padding(8)
+                        .style(theme::ghost(t))
+                        .on_press(Message::CloseSettings),
                 ]
                 .align_y(Alignment::Center)
                 .padding([0, 22]),
@@ -1833,20 +2370,35 @@ impl App {
             let (label, frac) = if p.unpacking {
                 ("Unpacking ffmpeg...".to_string(), 1.0)
             } else if p.total > 0 && p.done > 0 {
-                (format!("Downloading ffmpeg  {} / {}", human(p.done), human(p.total)), p.done as f32 / p.total as f32)
+                (
+                    format!("Downloading ffmpeg  {} / {}", human(p.done), human(p.total)),
+                    p.done as f32 / p.total as f32,
+                )
             } else {
                 ("Connecting to the download server...".to_string(), 0.0)
             };
             return column![
-                row![self.spinner(14.0, t.accent), text(label).size(12).color(t.muted)].spacing(8).align_y(Alignment::Center),
-                progress_bar(0.0..=1.0, frac).length(Length::Fill).girth(6).style(theme::bar(t)),
+                row![
+                    self.spinner(14.0, t.accent),
+                    text(label).size(12).color(t.muted)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                progress_bar(0.0..=1.0, frac)
+                    .length(Length::Fill)
+                    .girth(6)
+                    .style(theme::bar(t)),
             ]
             .spacing(6)
             .into();
         }
         let mut col = column![].spacing(6);
         if let Some(e) = &self.ffmpeg_err {
-            col = col.push(text(format!("The download did not work: {e}")).size(12).color(t.bad));
+            col = col.push(
+                text(format!("The download did not work: {e}"))
+                    .size(12)
+                    .color(t.bad),
+            );
         }
         match engine::tools::ffmpeg_download() {
             Some(tool) => {
@@ -1886,7 +2438,10 @@ impl App {
     /// Which file formats work: always the built-in ones, more when ffmpeg is available.
     fn formats_section(&self) -> Element<'_, Message> {
         let t = self.tokens;
-        let ours = self.ffmpeg.as_ref().is_some_and(|p| engine::tools::installed_ffmpeg().as_ref() == Some(p));
+        let ours = self
+            .ffmpeg
+            .as_ref()
+            .is_some_and(|p| engine::tools::installed_ffmpeg().as_ref() == Some(p));
         let status: Element<'_, Message> = match &self.ffmpeg {
             Some(p) => row![
                 icons::icon(icons::CHECK, 16.0, t.ok),
@@ -1945,39 +2500,72 @@ impl App {
     fn models_section(&self) -> Element<'_, Message> {
         let t = self.tokens;
         let reg = match &self.registry {
-            Err(e) => return section(t, "Models", text(format!("The model list could not be loaded: {e}")).color(t.bad).into()),
+            Err(e) => {
+                return section(
+                    t,
+                    "Models",
+                    text(format!("The model list could not be loaded: {e}"))
+                        .color(t.bad)
+                        .into(),
+                );
+            }
             Ok(r) => r,
         };
         let Some(det) = self.detection.as_ref() else {
             return section(
                 t,
                 "Models",
-                row![self.spinner(18.0, t.accent), text("Checking your hardware to pick the best models...").size(13).color(t.muted)]
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .into(),
+                row![
+                    self.spinner(18.0, t.accent),
+                    text("Checking your hardware to pick the best models...")
+                        .size(13)
+                        .color(t.muted)
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .into(),
             );
         };
-        let missing: Vec<&ModelEntry> =
-            self.selected_entries().into_iter().filter(|m| !matches!(self.store.status(m), Status::Present)).collect();
+        let missing: Vec<&ModelEntry> = self
+            .selected_entries()
+            .into_iter()
+            .filter(|m| !matches!(self.store.status(m), Status::Present))
+            .collect();
         let missing_bytes: u64 = missing.iter().map(|m| m.size_bytes).sum();
         let busy = !self.downloading.is_empty();
 
         let summary: Element<'_, Message> = if missing.is_empty() {
-            row![icons::icon(icons::CHECK, 16.0, t.ok), text("All selected models are downloaded.").size(13).color(t.ok)]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .into()
+            row![
+                icons::icon(icons::CHECK, 16.0, t.ok),
+                text("All selected models are downloaded.")
+                    .size(13)
+                    .color(t.ok)
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
         } else {
             row![
-                text(format!("{} of {} models still need downloading ({})", missing.len(), ROLES.len(), human(missing_bytes)))
-                    .size(13)
-                    .color(t.warn)
-                    .width(Length::Fill),
-                button(row![icons::icon(icons::DOWNLOAD, 15.0, t.on_accent), text("Download all").size(13)].spacing(6).align_y(Alignment::Center))
-                    .padding([7, 12])
-                    .style(theme::primary(t))
-                    .on_press_maybe((!busy).then_some(Message::DownloadAllMissing)),
+                text(format!(
+                    "{} of {} models still need downloading ({})",
+                    missing.len(),
+                    ROLES.len(),
+                    human(missing_bytes)
+                ))
+                .size(13)
+                .color(t.warn)
+                .width(Length::Fill),
+                button(
+                    row![
+                        icons::icon(icons::DOWNLOAD, 15.0, t.on_accent),
+                        text("Download all").size(13)
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                )
+                .padding([7, 12])
+                .style(theme::primary(t))
+                .on_press_maybe((!busy).then_some(Message::DownloadAllMissing)),
             ]
             .align_y(Alignment::Center)
             .into()
@@ -1990,15 +2578,34 @@ impl App {
         section(t, "Models", col.into())
     }
 
-    fn model_row<'a>(&'a self, reg: &'a Registry, role: Role, det: &'a Detection) -> Element<'a, Message> {
+    fn model_row<'a>(
+        &'a self,
+        reg: &'a Registry,
+        role: Role,
+        det: &'a Detection,
+    ) -> Element<'a, Message> {
         let t = self.tokens;
-        let options: Vec<Choice> = reg.for_role(role).map(|m| Choice { id: m.id.clone(), label: m.name.clone() }).collect();
-        let selected = self.selection.get(&role).and_then(|id| options.iter().find(|c| &c.id == id)).cloned();
+        let options: Vec<Choice> = reg
+            .for_role(role)
+            .map(|m| Choice {
+                id: m.id.clone(),
+                label: m.name.clone(),
+            })
+            .collect();
+        let selected = self
+            .selection
+            .get(&role)
+            .and_then(|id| options.iter().find(|c| &c.id == id))
+            .cloned();
         let entry = self.selection.get(&role).and_then(|id| reg.get(id).ok());
 
-        let mut right =
-            column![pick_list(options, selected, move |c| Message::Pick(role, c)).style(theme::pick(t)).padding(9).width(Length::Fill)]
-                .spacing(6);
+        let mut right = column![
+            pick_list(options, selected, move |c| Message::Pick(role, c))
+                .style(theme::pick(t))
+                .padding(9)
+                .width(Length::Fill)
+        ]
+        .spacing(6);
 
         if let Some(m) = entry {
             let f = fit(m, det);
@@ -2010,21 +2617,39 @@ impl App {
                 Fit::Unsupported => ("Not supported on this backend", t.bad),
             };
             let facts = if m.min_vram_mb > 0 {
-                format!("{}  -  needs about {} of GPU memory", human(m.size_bytes), human(m.min_vram_mb << 20))
+                format!(
+                    "{}  -  needs about {} of GPU memory",
+                    human(m.size_bytes),
+                    human(m.min_vram_mb << 20)
+                )
             } else {
                 format!("{}  -  small, runs anywhere", human(m.size_bytes))
             };
             let status: Element<'a, Message> = if let Some(p) = self.downloading.get(&m.id) {
-                let pct = if p.total > 0 { p.done as f32 / p.total as f32 } else { 0.0 };
+                let pct = if p.total > 0 {
+                    p.done as f32 / p.total as f32
+                } else {
+                    0.0
+                };
                 if p.done == 0 {
-                    row![self.spinner(14.0, t.accent), text("Connecting to the download server...").size(12).color(t.muted)]
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .into()
+                    row![
+                        self.spinner(14.0, t.accent),
+                        text("Connecting to the download server...")
+                            .size(12)
+                            .color(t.muted)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into()
                 } else {
                     row![
-                        progress_bar(0.0..=1.0, pct).length(Length::Fill).girth(6).style(theme::bar(t)),
-                        text(format!("{} / {}", human(p.done), human(p.total))).size(12).color(t.muted),
+                        progress_bar(0.0..=1.0, pct)
+                            .length(Length::Fill)
+                            .girth(6)
+                            .style(theme::bar(t)),
+                        text(format!("{} / {}", human(p.done), human(p.total)))
+                            .size(12)
+                            .color(t.muted),
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center)
@@ -2032,18 +2657,27 @@ impl App {
                 }
             } else if let Some(err) = self.errors.get(&m.id) {
                 row![
-                    text(format!("Download failed: {err}")).size(12).color(t.bad).width(Length::Fill),
-                    button(text("Retry").size(12)).padding([6, 10]).style(theme::outline_btn(t)).on_press(Message::Download(m.id.clone())),
+                    text(format!("Download failed: {err}"))
+                        .size(12)
+                        .color(t.bad)
+                        .width(Length::Fill),
+                    button(text("Retry").size(12))
+                        .padding([6, 10])
+                        .style(theme::outline_btn(t))
+                        .on_press(Message::Download(m.id.clone())),
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center)
                 .into()
             } else {
                 match self.store.status(m) {
-                    Status::Present => row![icons::icon(icons::CHECK, 14.0, t.ok), text("Downloaded").size(12).color(t.ok)]
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                        .into(),
+                    Status::Present => row![
+                        icons::icon(icons::CHECK, 14.0, t.ok),
+                        text("Downloaded").size(12).color(t.ok)
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .into(),
                     Status::LocalMissing => text("File not found").size(12).color(t.bad).into(),
                     st => {
                         let label = match st {
@@ -2054,10 +2688,17 @@ impl App {
                         row![
                             text("Not downloaded").size(12).color(t.warn),
                             space::horizontal(),
-                            button(row![icons::icon(icons::DOWNLOAD, 14.0, t.on_accent), text(label).size(12)].spacing(6).align_y(Alignment::Center))
-                                .padding([6, 11])
-                                .style(theme::primary(t))
-                                .on_press_maybe((!blocked).then(|| Message::Download(m.id.clone()))),
+                            button(
+                                row![
+                                    icons::icon(icons::DOWNLOAD, 14.0, t.on_accent),
+                                    text(label).size(12)
+                                ]
+                                .spacing(6)
+                                .align_y(Alignment::Center)
+                            )
+                            .padding([6, 11])
+                            .style(theme::primary(t))
+                            .on_press_maybe((!blocked).then(|| Message::Download(m.id.clone()))),
                         ]
                         .align_y(Alignment::Center)
                         .into()
@@ -2065,18 +2706,36 @@ impl App {
                 }
             };
             right = right
-                .push(row![text(fit_text).size(12).color(fit_color), text("-").size(12).color(t.faint), text(facts).size(12).color(t.muted)].spacing(8))
+                .push(
+                    row![
+                        text(fit_text).size(12).color(fit_color),
+                        text("-").size(12).color(t.faint),
+                        text(facts).size(12).color(t.muted)
+                    ]
+                    .spacing(8),
+                )
                 .push(status);
         }
 
-        row![text(role_label(role)).size(14).color(t.text).width(Length::Fixed(150.0)), right.width(Length::Fill)].spacing(14).into()
+        row![
+            text(role_label(role))
+                .size(14)
+                .color(t.text)
+                .width(Length::Fixed(150.0)),
+            right.width(Length::Fill)
+        ]
+        .spacing(14)
+        .into()
     }
 }
 
 // ------------------------------------------------------------------ view helpers
 
 fn semibold() -> Font {
-    Font { weight: font::Weight::Semibold, ..Font::DEFAULT }
+    Font {
+        weight: font::Weight::Semibold,
+        ..Font::DEFAULT
+    }
 }
 
 fn section<'a>(t: Tokens, title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
@@ -2087,20 +2746,37 @@ fn section<'a>(t: Tokens, title: &'a str, body: Element<'a, Message>) -> Element
         .into()
 }
 
-fn nav_button<'a>(t: Tokens, icon: &'static str, label: &'a str, active: bool, msg: Message) -> Element<'a, Message> {
-    button(row![icons::icon(icon, 18.0, if active { t.accent } else { t.muted }), text(label).size(14)].spacing(12).align_y(Alignment::Center))
-        .padding([10, 12])
-        .width(Length::Fill)
-        .style(theme::nav_item(t, active))
-        .on_press(msg)
-        .into()
+fn nav_button<'a>(
+    t: Tokens,
+    icon: &'static str,
+    label: &'a str,
+    active: bool,
+    msg: Message,
+) -> Element<'a, Message> {
+    button(
+        row![
+            icons::icon(icon, 18.0, if active { t.accent } else { t.muted }),
+            text(label).size(14)
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+    )
+    .padding([10, 12])
+    .width(Length::Fill)
+    .style(theme::nav_item(t, active))
+    .on_press(msg)
+    .into()
 }
 
 /// File types that are sound only (shown with a waveform icon instead of a camera).
 fn is_audio_file(path: &std::path::Path) -> bool {
-    const AUDIO: [&str; 18] =
-        ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "oga", "mka", "wma", "amr", "mp2", "aif", "aiff", "caf", "ac3", "wv", "ape"];
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| AUDIO.contains(&e.to_lowercase().as_str()))
+    const AUDIO: [&str; 18] = [
+        "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "oga", "mka", "wma", "amr", "mp2",
+        "aif", "aiff", "caf", "ac3", "wv", "ape",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| AUDIO.contains(&e.to_lowercase().as_str()))
 }
 
 fn role_label(role: Role) -> &'static str {
@@ -2138,9 +2814,22 @@ struct Usage {
 impl Usage {
     /// One line: "CPU 34%  -  RAM 6.1 / 16 GB  -  GPU 78%  -  VRAM 1.4 / 4.0 GB".
     fn summary(&self) -> String {
-        let mut s = format!("CPU {:.0}%  -  RAM {} / {}", self.cpu, human(self.ram_used), human(self.ram_total));
-        if let (Some(g), Some(used), Some(total)) = (self.gpu.gpu_percent, self.gpu.vram_used_mb, self.gpu.vram_total_mb) {
-            s.push_str(&format!("  -  GPU {g}%  -  VRAM {} / {}", human(used << 20), human(total << 20)));
+        let mut s = format!(
+            "CPU {:.0}%  -  RAM {} / {}",
+            self.cpu,
+            human(self.ram_used),
+            human(self.ram_total)
+        );
+        if let (Some(g), Some(used), Some(total)) = (
+            self.gpu.gpu_percent,
+            self.gpu.vram_used_mb,
+            self.gpu.vram_total_mb,
+        ) {
+            s.push_str(&format!(
+                "  -  GPU {g}%  -  VRAM {} / {}",
+                human(used << 20),
+                human(total << 20)
+            ));
         }
         s
     }
@@ -2152,7 +2841,9 @@ fn usage_stream() -> impl Stream<Item = Usage> {
         let (tx, mut rx) = mpsc::unbounded::<Usage>();
         std::thread::spawn(move || {
             test_delay();
-            let Ok(mut sys) = sysinfo::System::new() else { return };
+            let Ok(mut sys) = sysinfo::System::new() else {
+                return;
+            };
             let gpu = gpu_detect::GpuMonitor::new();
             loop {
                 sys.refresh_cpu_usage();
@@ -2184,11 +2875,26 @@ fn mmss(secs: u64) -> String {
 /// Label, filled bar (turns amber / red when nearly full) and value.
 fn meter<'a>(t: Tokens, label: &'a str, fraction: f32, value: String) -> Element<'a, Message> {
     let f = fraction.clamp(0.0, 1.0);
-    let color = if f > 0.92 { t.bad } else if f > 0.75 { t.warn } else { t.accent };
+    let color = if f > 0.92 {
+        t.bad
+    } else if f > 0.75 {
+        t.warn
+    } else {
+        t.accent
+    };
     row![
-        text(label).size(13).color(t.text).width(Length::Fixed(120.0)),
-        progress_bar(0.0..=1.0, f).length(Length::Fill).girth(8).style(theme::bar_tint(t, color)),
-        text(value).size(12).color(t.muted).width(Length::Fixed(130.0)),
+        text(label)
+            .size(13)
+            .color(t.text)
+            .width(Length::Fixed(120.0)),
+        progress_bar(0.0..=1.0, f)
+            .length(Length::Fill)
+            .girth(8)
+            .style(theme::bar_tint(t, color)),
+        text(value)
+            .size(12)
+            .color(t.muted)
+            .width(Length::Fixed(130.0)),
     ]
     .spacing(12)
     .align_y(Alignment::Center)
@@ -2206,14 +2912,33 @@ fn resize_edges<'a>() -> Element<'a, Message> {
             D::NorthWest | D::SouthEast => Interaction::ResizingDiagonallyDown,
             D::NorthEast | D::SouthWest => Interaction::ResizingDiagonallyUp,
         };
-        mouse_area(space::horizontal().width(w).height(h)).on_press(Message::ResizeEdge(dir)).interaction(cursor).into()
+        mouse_area(space::horizontal().width(w).height(h))
+            .on_press(Message::ResizeEdge(dir))
+            .interaction(cursor)
+            .into()
     };
     let (corner, thin) = (Length::Fixed(10.0), Length::Fixed(4.0));
-    let top = row![edge(D::NorthWest, corner, corner), edge(D::North, Length::Fill, thin), edge(D::NorthEast, corner, corner)];
-    let middle = row![edge(D::West, thin, Length::Fill), space::horizontal(), edge(D::East, thin, Length::Fill)].height(Length::Fill);
-    let bottom = row![edge(D::SouthWest, corner, corner), edge(D::South, Length::Fill, thin), edge(D::SouthEast, corner, corner)]
-        .align_y(Alignment::End);
-    container(column![top, middle, bottom]).width(Length::Fill).height(Length::Fill).into()
+    let top = row![
+        edge(D::NorthWest, corner, corner),
+        edge(D::North, Length::Fill, thin),
+        edge(D::NorthEast, corner, corner)
+    ];
+    let middle = row![
+        edge(D::West, thin, Length::Fill),
+        space::horizontal(),
+        edge(D::East, thin, Length::Fill)
+    ]
+    .height(Length::Fill);
+    let bottom = row![
+        edge(D::SouthWest, corner, corner),
+        edge(D::South, Length::Fill, thin),
+        edge(D::SouthEast, corner, corner)
+    ]
+    .align_y(Alignment::End);
+    container(column![top, middle, bottom])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 // ------------------------------------------------------------------ async helpers
@@ -2242,7 +2967,10 @@ async fn check_files(files: Vec<PathBuf>) -> Vec<(PathBuf, engine::audio::Probe)
 
 /// Dev helper: `MT_SLOW=5000` delays hardware detection and the first usage reading by 5 s, to look at the loading states.
 fn test_delay() {
-    if let Some(ms) = std::env::var("MT_SLOW").ok().and_then(|v| v.parse::<u64>().ok()) {
+    if let Some(ms) = std::env::var("MT_SLOW")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
         std::thread::sleep(Duration::from_millis(ms));
     }
 }
@@ -2344,7 +3072,11 @@ async fn pick_ffmpeg() -> Option<PathBuf> {
 }
 
 async fn pick_folder() -> Option<PathBuf> {
-    rfd::AsyncFileDialog::new().set_title("Choose the results folder").pick_folder().await.map(|f| f.path().to_path_buf())
+    rfd::AsyncFileDialog::new()
+        .set_title("Choose the results folder")
+        .pick_folder()
+        .await
+        .map(|f| f.path().to_path_buf())
 }
 
 /// Runs the whole pipeline for one file on its own thread and streams events to the UI.
@@ -2365,7 +3097,9 @@ fn job_stream(input: pipeline::JobInput) -> impl Stream<Item = pipeline::Event> 
                     let _ = tx2.unbounded_send(pipeline::Event::Failed(msg));
                 }
                 Err(_) => {
-                    let _ = tx2.unbounded_send(pipeline::Event::Failed("Internal error while processing this file.".into()));
+                    let _ = tx2.unbounded_send(pipeline::Event::Failed(
+                        "Internal error while processing this file.".into(),
+                    ));
                 }
             }
         });
@@ -2376,7 +3110,11 @@ fn job_stream(input: pipeline::JobInput) -> impl Stream<Item = pipeline::Event> 
 }
 
 /// Runs the blocking download on its own thread and streams progress to the UI.
-fn download_stream(entry: ModelEntry, dir: PathBuf, token: Option<String>) -> impl Stream<Item = DownloadEvent> {
+fn download_stream(
+    entry: ModelEntry,
+    dir: PathBuf,
+    token: Option<String>,
+) -> impl Stream<Item = DownloadEvent> {
     iced::stream::channel(32, async move |mut out: mpsc::Sender<DownloadEvent>| {
         let (tx, mut rx) = mpsc::unbounded::<DownloadEvent>();
         std::thread::spawn(move || {
@@ -2388,7 +3126,9 @@ fn download_stream(entry: ModelEntry, dir: PathBuf, token: Option<String>) -> im
                     let _ = tx.unbounded_send(DownloadEvent::Progress { done, total });
                 }
             });
-            let _ = tx.unbounded_send(DownloadEvent::Finished(result.map(|_| ()).map_err(|e| e.to_string())));
+            let _ = tx.unbounded_send(DownloadEvent::Finished(
+                result.map(|_| ()).map_err(|e| e.to_string()),
+            ));
         });
         while let Some(ev) = rx.next().await {
             let finished = matches!(ev, DownloadEvent::Finished(_));

@@ -1,9 +1,9 @@
 //! Design tokens and widget styles. The palette and radii follow the ddIRC app: calm layered
 //! surfaces, one soft accent, hairline borders, generous radii, no shadows or ripples.
 
+use iced::theme::Palette;
 use iced::widget::{button, container, pick_list, progress_bar, text_editor, text_input};
 use iced::{Background, Border, Color, Shadow, Theme, border};
-use iced::theme::Palette;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tokens {
@@ -85,7 +85,11 @@ impl Tokens {
     pub fn speaker(self, i: usize) -> Color {
         const DARKS: [u32; 6] = [0x8AB4F8, 0x7BCF95, 0xE2BA55, 0xE59ACB, 0xB59BF0, 0x6FD0D0];
         const LIGHTS: [u32; 6] = [0x3563C0, 0x19703B, 0x845D00, 0xA33D80, 0x6B45C2, 0x1B7F86];
-        hex(if self.dark { DARKS[i % 6] } else { LIGHTS[i % 6] })
+        hex(if self.dark {
+            DARKS[i % 6]
+        } else {
+            LIGHTS[i % 6]
+        })
     }
 }
 
@@ -94,11 +98,20 @@ pub fn with_alpha(c: Color, a: f32) -> Color {
 }
 
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
-    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
 }
 
 fn outline(c: Color, radius: f32) -> Border {
-    Border { color: c, width: 1.0, radius: border::radius(radius) }
+    Border {
+        color: c,
+        width: 1.0,
+        radius: border::radius(radius),
+    }
 }
 
 // ------------------------------------------------------------------ containers
@@ -115,7 +128,11 @@ pub fn card(t: Tokens) -> impl Fn(&Theme) -> container::Style {
 pub fn panel(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(t.surface)),
-        border: Border { color: t.rule, width: 1.0, radius: border::radius(0) },
+        border: Border {
+            color: t.rule,
+            width: 1.0,
+            radius: border::radius(0),
+        },
         ..Default::default()
     }
 }
@@ -132,7 +149,11 @@ pub fn bubble(t: Tokens) -> impl Fn(&Theme) -> container::Style {
 pub fn chip(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(with_alpha(color, 0.14))),
-        border: Border { color: with_alpha(color, 0.35), width: 1.0, radius: border::radius(PILL) },
+        border: Border {
+            color: with_alpha(color, 0.35),
+            width: 1.0,
+            radius: border::radius(PILL),
+        },
         ..Default::default()
     }
 }
@@ -140,7 +161,10 @@ pub fn chip(color: Color) -> impl Fn(&Theme) -> container::Style {
 pub fn disc(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(color)),
-        border: Border { radius: border::radius(PILL), ..Default::default() },
+        border: Border {
+            radius: border::radius(PILL),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -148,20 +172,36 @@ pub fn disc(color: Color) -> impl Fn(&Theme) -> container::Style {
 pub fn rounded_fill(color: Color, radius: f32) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(color)),
-        border: Border { radius: border::radius(radius), ..Default::default() },
+        border: Border {
+            radius: border::radius(radius),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
 
 pub fn scrim() -> impl Fn(&Theme) -> container::Style {
-    |_| container::Style { background: Some(Background::Color(Color { a: 0.62, ..Color::BLACK })), ..Default::default() }
+    |_| container::Style {
+        background: Some(Background::Color(Color {
+            a: 0.62,
+            ..Color::BLACK
+        })),
+        ..Default::default()
+    }
 }
 
 pub fn dialog(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(t.bg)),
         border: outline(t.rule, RADIUS_L),
-        shadow: Shadow { color: Color { a: 0.45, ..Color::BLACK }, offset: iced::Vector::new(0.0, 12.0), blur_radius: 40.0 },
+        shadow: Shadow {
+            color: Color {
+                a: 0.45,
+                ..Color::BLACK
+            },
+            offset: iced::Vector::new(0.0, 12.0),
+            blur_radius: 40.0,
+        },
         ..Default::default()
     }
 }
@@ -183,14 +223,20 @@ pub fn primary(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
             return button::Style {
                 background: Some(Background::Color(t.hover)),
                 text_color: t.faint,
-                border: Border { radius: border::radius(RADIUS_S), ..Default::default() },
+                border: Border {
+                    radius: border::radius(RADIUS_S),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
         }
         button::Style {
             background: Some(Background::Color(press_dim(t.accent, status, t))),
             text_color: t.on_accent,
-            border: Border { radius: border::radius(RADIUS_S), ..Default::default() },
+            border: Border {
+                radius: border::radius(RADIUS_S),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -205,7 +251,12 @@ pub fn outline_btn(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Styl
             button::Status::Disabled => (None, t.faint),
             _ => (None, t.text),
         };
-        button::Style { background: bg, text_color: fg, border: outline(t.rule, RADIUS_S), ..Default::default() }
+        button::Style {
+            background: bg,
+            text_color: fg,
+            border: outline(t.rule, RADIUS_S),
+            ..Default::default()
+        }
     }
 }
 
@@ -213,11 +264,21 @@ pub fn outline_btn(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Styl
 pub fn ghost(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
         let (bg, fg) = match status {
-            button::Status::Hovered | button::Status::Pressed => (Some(Background::Color(t.hover)), t.text),
+            button::Status::Hovered | button::Status::Pressed => {
+                (Some(Background::Color(t.hover)), t.text)
+            }
             button::Status::Disabled => (None, t.faint),
             _ => (None, t.muted),
         };
-        button::Style { background: bg, text_color: fg, border: Border { radius: border::radius(RADIUS_S), ..Default::default() }, ..Default::default() }
+        button::Style {
+            background: bg,
+            text_color: fg,
+            border: Border {
+                radius: border::radius(RADIUS_S),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 }
 
@@ -234,7 +295,10 @@ pub fn nav_item(t: Tokens, active: bool) -> impl Fn(&Theme, button::Status) -> b
         button::Style {
             background: bg,
             text_color: if active { t.accent } else { t.text },
-            border: Border { radius: border::radius(RADIUS_S), ..Default::default() },
+            border: Border {
+                radius: border::radius(RADIUS_S),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -253,7 +317,14 @@ pub fn segment(t: Tokens, selected: bool) -> impl Fn(&Theme, button::Status) -> 
                 Color::TRANSPARENT
             })),
             text_color: if selected { t.accent } else { t.muted },
-            border: outline(if selected { with_alpha(t.accent, 0.5) } else { t.rule }, RADIUS_S),
+            border: outline(
+                if selected {
+                    with_alpha(t.accent, 0.5)
+                } else {
+                    t.rule
+                },
+                RADIUS_S,
+            ),
             ..Default::default()
         }
     }
@@ -299,7 +370,11 @@ pub fn pick(t: Tokens) -> impl Fn(&Theme, pick_list::Status) -> pick_list::Style
 /// Thin outline circle (a step that has not started).
 pub fn ring(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        border: Border { color, width: 1.5, radius: border::radius(PILL) },
+        border: Border {
+            color,
+            width: 1.5,
+            radius: border::radius(PILL),
+        },
         ..Default::default()
     }
 }
@@ -309,7 +384,10 @@ pub fn bar_tint(t: Tokens, color: Color) -> impl Fn(&Theme) -> progress_bar::Sty
     move |_| progress_bar::Style {
         background: Background::Color(t.rule),
         bar: Background::Color(color),
-        border: Border { radius: border::radius(PILL), ..Default::default() },
+        border: Border {
+            radius: border::radius(PILL),
+            ..Default::default()
+        },
     }
 }
 
@@ -317,7 +395,10 @@ pub fn bar(t: Tokens) -> impl Fn(&Theme) -> progress_bar::Style {
     move |_| progress_bar::Style {
         background: Background::Color(t.rule),
         bar: Background::Color(t.accent),
-        border: Border { radius: border::radius(PILL), ..Default::default() },
+        border: Border {
+            radius: border::radius(PILL),
+            ..Default::default()
+        },
     }
 }
 
@@ -326,7 +407,10 @@ pub fn bar(t: Tokens) -> impl Fn(&Theme) -> progress_bar::Style {
 /// Title strip at the top of the window. Same colour as the sidebar, so strip + sidebar form one
 /// L-shaped frame around the content (like the VS Code title bar and side bar).
 pub fn strip(t: Tokens) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style { background: Some(Background::Color(t.surface)), ..Default::default() }
+    move |_| container::Style {
+        background: Some(Background::Color(t.surface)),
+        ..Default::default()
+    }
 }
 
 /// Sidebar: the strip colour, no border (a separate 1 px divider sits on its right edge).
@@ -334,22 +418,36 @@ pub fn strip(t: Tokens) -> impl Fn(&Theme) -> container::Style {
 pub fn sidebar(t: Tokens, round_bottom_left: bool) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(t.surface)),
-        border: Border { radius: border::Radius::new(0).bottom_left(if round_bottom_left { 7.0 } else { 0.0 }), ..Default::default() },
+        border: Border {
+            radius: border::Radius::new(0).bottom_left(if round_bottom_left { 7.0 } else { 0.0 }),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
 
 pub fn divider(t: Tokens) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style { background: Some(Background::Color(t.rule)), ..Default::default() }
+    move |_| container::Style {
+        background: Some(Background::Color(t.rule)),
+        ..Default::default()
+    }
 }
 
 /// One pixel frame around the window (only drawn when we draw the window chrome ourselves).
 /// `radius` matches the system's rounded window corners (Windows 11), 0 otherwise.
-pub fn window_frame(t: Tokens, draw_border: bool, radius: f32) -> impl Fn(&Theme) -> container::Style {
+pub fn window_frame(
+    t: Tokens,
+    draw_border: bool,
+    radius: f32,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(t.bg)),
         border: Border {
-            color: if draw_border { t.rule } else { Color::TRANSPARENT },
+            color: if draw_border {
+                t.rule
+            } else {
+                Color::TRANSPARENT
+            },
             width: 1.0,
             radius: border::radius(radius),
         },
@@ -368,7 +466,12 @@ pub fn win_button(t: Tokens, close: bool) -> impl Fn(&Theme, button::Status) -> 
         } else {
             Some(Background::Color(t.hover))
         };
-        button::Style { background: bg, text_color: t.text, border: Border::default(), ..Default::default() }
+        button::Style {
+            background: bg,
+            text_color: t.text,
+            border: Border::default(),
+            ..Default::default()
+        }
     }
 }
 
@@ -376,7 +479,11 @@ pub fn win_button(t: Tokens, close: bool) -> impl Fn(&Theme, button::Status) -> 
 pub fn selectable(t: Tokens) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style {
     move |_, _| text_editor::Style {
         background: Background::Color(Color::TRANSPARENT),
-        border: Border { width: 0.0, radius: border::radius(0), color: Color::TRANSPARENT },
+        border: Border {
+            width: 0.0,
+            radius: border::radius(0),
+            color: Color::TRANSPARENT,
+        },
         placeholder: t.faint,
         value: t.text,
         selection: with_alpha(t.accent, 0.38),

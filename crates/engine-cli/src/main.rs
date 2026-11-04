@@ -97,7 +97,11 @@ fn load_registry(explicit: Option<PathBuf>) -> Result<Registry> {
 }
 
 fn mb(bytes: u64) -> String {
-    if bytes >= 1 << 30 { format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64) } else { format!("{} MB", bytes >> 20) }
+    if bytes >= 1 << 30 {
+        format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+    } else {
+        format!("{} MB", bytes >> 20)
+    }
 }
 
 fn fit_label(f: Fit) -> &'static str {
@@ -112,7 +116,11 @@ fn fit_label(f: Fit) -> &'static str {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let store = ModelStore::new(cli.models_dir.clone().unwrap_or_else(ModelStore::default_dir));
+    let store = ModelStore::new(
+        cli.models_dir
+            .clone()
+            .unwrap_or_else(ModelStore::default_dir),
+    );
 
     match cli.cmd {
         Cmd::Detect { json } => {
@@ -121,21 +129,44 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&d)?);
             } else {
                 for (i, g) in d.gpus.iter().enumerate() {
-                    let vram = g.vram_mb.map(|m| format!("{m} MiB")).unwrap_or_else(|| "VRAM unknown".into());
-                    println!("{} [{i}] {} ({vram})", if d.recommended_gpu == Some(i) { "*" } else { " " }, g.name);
+                    let vram = g
+                        .vram_mb
+                        .map(|m| format!("{m} MiB"))
+                        .unwrap_or_else(|| "VRAM unknown".into());
+                    println!(
+                        "{} [{i}] {} ({vram})",
+                        if d.recommended_gpu == Some(i) {
+                            "*"
+                        } else {
+                            " "
+                        },
+                        g.name
+                    );
                 }
                 println!("backend: {} - {}", d.recommended.as_str(), d.reason);
             }
         }
         Cmd::InstallFfmpeg => {
-            let tool = engine::tools::ffmpeg_download().context("no ffmpeg download is defined for this system")?;
-            println!("{} {} ({}), into {}", tool.name, tool.version, tool.licence, engine::tools::tools_dir().display());
+            let tool = engine::tools::ffmpeg_download()
+                .context("no ffmpeg download is defined for this system")?;
+            println!(
+                "{} {} ({}), into {}",
+                tool.name,
+                tool.version,
+                tool.licence,
+                engine::tools::tools_dir().display()
+            );
             let mut last = 0u64;
             let exe = engine::tools::install_ffmpeg(&mut |step| match step {
                 engine::tools::InstallStep::Downloading { done, total } => {
                     if done.saturating_sub(last) >= (4 << 20) || done == total {
                         last = done;
-                        print!("\rdownloading {} / {} ({}%)   ", mb(done), mb(total), if total > 0 { done * 100 / total } else { 0 });
+                        print!(
+                            "\rdownloading {} / {} ({}%)   ",
+                            mb(done),
+                            mb(total),
+                            if total > 0 { done * 100 / total } else { 0 }
+                        );
                         let _ = std::io::stdout().flush();
                     }
                 }
@@ -143,7 +174,13 @@ fn main() -> Result<()> {
             })?;
             println!("ready: {}", exe.display());
         }
-        Cmd::Export { asr, turns, out_dir, name, speakers } => {
+        Cmd::Export {
+            asr,
+            turns,
+            out_dir,
+            name,
+            speakers,
+        } => {
             let asr_result = engine::transcript::AsrResult::load(&asr)?;
             let turns: Option<Vec<engine::transcript::SpeakerTurn>> = match turns {
                 Some(p) => {
@@ -151,26 +188,49 @@ fn main() -> Result<()> {
                     struct File {
                         turns: Vec<engine::transcript::SpeakerTurn>,
                     }
-                    let f: File = serde_json::from_str(&std::fs::read_to_string(&p)?).context("reading speaker turns")?;
+                    let f: File = serde_json::from_str(&std::fs::read_to_string(&p)?)
+                        .context("reading speaker turns")?;
                     Some(f.turns)
                 }
                 None => None,
             };
-            let t = engine::transcript::Transcript::build(&name, &asr_result, turns.as_deref(), &speakers);
+            let t = engine::transcript::Transcript::build(
+                &name,
+                &asr_result,
+                turns.as_deref(),
+                &speakers,
+            );
             std::fs::create_dir_all(&out_dir)?;
             t.save(&out_dir.join(format!("{name}.json")))?;
             std::fs::write(out_dir.join(format!("{name}.txt")), t.to_txt())?;
-            let cues = engine::subtitles::build_cues(&t, &engine::subtitles::SubtitleOptions::default());
-            std::fs::write(out_dir.join(format!("{name}.srt")), engine::subtitles::to_srt(&cues))?;
-            std::fs::write(out_dir.join(format!("{name}.vtt")), engine::subtitles::to_vtt(&cues))?;
-            println!("{} utterances, {} subtitle cues -> {}", t.utterances.len(), cues.len(), out_dir.display());
+            let cues =
+                engine::subtitles::build_cues(&t, &engine::subtitles::SubtitleOptions::default());
+            std::fs::write(
+                out_dir.join(format!("{name}.srt")),
+                engine::subtitles::to_srt(&cues),
+            )?;
+            std::fs::write(
+                out_dir.join(format!("{name}.vtt")),
+                engine::subtitles::to_vtt(&cues),
+            )?;
+            println!(
+                "{} utterances, {} subtitle cues -> {}",
+                t.utterances.len(),
+                cues.len(),
+                out_dir.display()
+            );
         }
         Cmd::Audio(AudioCmd::Decode { input, out }) => {
             let t = std::time::Instant::now();
             let samples = engine::audio::decode_to_mono_16k(&input)?;
             let secs = samples.len() as f64 / 16_000.0;
-            println!("{}: {:.2} s of audio, decoded in {:.1} s ({:.0}x real time)", input.display(), secs,
-                t.elapsed().as_secs_f64(), secs / t.elapsed().as_secs_f64().max(1e-9));
+            println!(
+                "{}: {:.2} s of audio, decoded in {:.1} s ({:.0}x real time)",
+                input.display(),
+                secs,
+                t.elapsed().as_secs_f64(),
+                secs / t.elapsed().as_secs_f64().max(1e-9)
+            );
             if let Some(out) = out {
                 engine::audio::write_wav_16k(&out, &samples)?;
                 println!("saved {}", out.display());
@@ -187,7 +247,15 @@ fn main() -> Result<()> {
             for lag in -1600i64..=1600 {
                 let (mut sab, mut saa, mut sbb) = (0f64, 0f64, 0f64);
                 for i in 0..win {
-                    let (Some(a), Some(b)) = (ours.get(start + i), theirs.get((start + i) as i64 as usize).filter(|_| true).and_then(|_| theirs.get(((start + i) as i64 + lag) as usize))) else { continue };
+                    let (Some(a), Some(b)) = (
+                        ours.get(start + i),
+                        theirs
+                            .get((start + i) as i64 as usize)
+                            .filter(|_| true)
+                            .and_then(|_| theirs.get(((start + i) as i64 + lag) as usize)),
+                    ) else {
+                        continue;
+                    };
                     let (a, b) = (*a as f64, *b as f64);
                     sab += a * b;
                     saa += a * a;
@@ -207,10 +275,16 @@ fn main() -> Result<()> {
                 saa += a * a;
                 sbb += b * b;
             }
-            println!("whole file at 0 ms shift: correlation {:.4}", sab / (saa.sqrt() * sbb.sqrt()).max(1e-12));
+            println!(
+                "whole file at 0 ms shift: correlation {:.4}",
+                sab / (saa.sqrt() * sbb.sqrt()).max(1e-12)
+            );
             println!(
                 "{}: ours {:.2} s | reference {:.2} s | diff {:+.3} s | best match {:.4} at shift {:+.1} ms",
-                input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                input
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 ours.len() as f64 / 16e3,
                 theirs.len() as f64 / 16e3,
                 (ours.len() as f64 - theirs.len() as f64) / 16e3,
@@ -221,18 +295,46 @@ fn main() -> Result<()> {
         Cmd::Models(ModelsCmd::List { role }) => {
             let reg = load_registry(cli.registry)?;
             let det = gpu_detect::detect();
-            println!("backend: {} | models dir: {}\n", det.recommended.as_str(), store.dir().display());
-            println!("{:<34} {:<20} {:>8}  {:<10} {:<12} {}", "id", "roles", "size", "fit", "installed", "hash");
-            for m in reg.models.iter().filter(|m| role.is_none_or(|r| m.has_role(r))) {
-                let roles = m.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(",");
+            println!(
+                "backend: {} | models dir: {}\n",
+                det.recommended.as_str(),
+                store.dir().display()
+            );
+            println!(
+                "{:<34} {:<20} {:>8}  {:<10} {:<12} hash",
+                "id", "roles", "size", "fit", "installed"
+            );
+            for m in reg
+                .models
+                .iter()
+                .filter(|m| role.is_none_or(|r| m.has_role(r)))
+            {
+                let roles = m
+                    .roles
+                    .iter()
+                    .map(|r| r.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let state = match store.status(m) {
                     Status::Present => "yes".to_string(),
                     Status::Partial(n) => format!("partial {}", mb(n)),
                     Status::Missing => "no".into(),
                     Status::LocalMissing => "file missing".into(),
                 };
-                let hash = if m.sha256.is_some() { "sha256" } else { "UNVERIFIED" };
-                println!("{:<34} {:<20} {:>8}  {:<10} {:<12} {}", m.id, roles, mb(m.size_bytes), fit_label(fit(m, &det)), state, hash);
+                let hash = if m.sha256.is_some() {
+                    "sha256"
+                } else {
+                    "UNVERIFIED"
+                };
+                println!(
+                    "{:<34} {:<20} {:>8}  {:<10} {:<12} {}",
+                    m.id,
+                    roles,
+                    mb(m.size_bytes),
+                    fit_label(fit(m, &det)),
+                    state,
+                    hash
+                );
             }
         }
         Cmd::Models(ModelsCmd::Recommend { preset }) => {
@@ -261,8 +363,16 @@ fn main() -> Result<()> {
                         let _ = std::io::stdout().flush();
                     }
                 })?;
-                println!("\r{id}: ok in {:.0}s -> {}{}", started.elapsed().as_secs_f32(), path.display(),
-                    if m.sha256.is_some() { " (sha256 verified)" } else { " (no hash in registry, NOT verified)" });
+                println!(
+                    "\r{id}: ok in {:.0}s -> {}{}",
+                    started.elapsed().as_secs_f32(),
+                    path.display(),
+                    if m.sha256.is_some() {
+                        " (sha256 verified)"
+                    } else {
+                        " (no hash in registry, NOT verified)"
+                    }
+                );
             }
         }
         Cmd::Models(ModelsCmd::Verify { ids }) => {
@@ -273,13 +383,21 @@ fn main() -> Result<()> {
                 match store.status(m) {
                     Status::Present => match store.verify(m)? {
                         Some(true) => println!("{id}: OK"),
-                        Some(false) => { println!("{id}: HASH MISMATCH"); bad = true; }
+                        Some(false) => {
+                            println!("{id}: HASH MISMATCH");
+                            bad = true;
+                        }
                         None => println!("{id}: present, registry has no hash"),
                     },
-                    other => { println!("{id}: not installed ({other:?})"); bad = true; }
+                    other => {
+                        println!("{id}: not installed ({other:?})");
+                        bad = true;
+                    }
                 }
             }
-            if bad { std::process::exit(1); }
+            if bad {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

@@ -21,8 +21,8 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext, WhisperVadContextParams,
-    WhisperVadParams,
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
+    WhisperVadContextParams, WhisperVadParams,
 };
 
 #[derive(Parser)]
@@ -86,7 +86,8 @@ fn main() {
 
 /// Same format as the Python pipeline: one item per line or comma separated, `#` starts a comment.
 fn load_glossary(path: &Path) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading glossary {}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading glossary {}", path.display()))?;
     let mut terms: Vec<String> = Vec::new();
     for line in text.trim_start_matches('\u{feff}').lines() {
         for t in line.split('#').next().unwrap_or("").split(',') {
@@ -103,7 +104,10 @@ fn load_glossary(path: &Path) -> Result<Vec<String>> {
 /// audio chunk that was transcribed, so times land on the original timeline.
 fn collect_segments(state: &whisper_rs::WhisperState, offset: f64, out: &mut Vec<Segment>) {
     for seg in state.as_iter() {
-        let text = seg.to_str_lossy().map(|s| s.trim().to_string()).unwrap_or_default();
+        let text = seg
+            .to_str_lossy()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         if text.is_empty() {
             continue;
         }
@@ -113,25 +117,49 @@ fn collect_segments(state: &whisper_rs::WhisperState, offset: f64, out: &mut Vec
         // group tokens into words: a token that starts with a space begins a new word
         let mut words: Vec<Word> = Vec::new();
         for i in 0..seg.n_tokens() {
-            let Some(tok) = seg.get_token(i) else { continue };
-            let piece = tok.to_str_lossy().map(|s| s.into_owned()).unwrap_or_default();
+            let Some(tok) = seg.get_token(i) else {
+                continue;
+            };
+            let piece = tok
+                .to_str_lossy()
+                .map(|s| s.into_owned())
+                .unwrap_or_default();
             if piece.is_empty() || piece.starts_with("[_") || piece.starts_with("<|") {
                 continue; // special token
             }
             let d = tok.token_data();
-            let t0 = if d.t0 >= 0 { offset + d.t0 as f64 / 100.0 } else { seg_start };
-            let t1 = if d.t1 >= 0 { offset + d.t1 as f64 / 100.0 } else { seg_end };
+            let t0 = if d.t0 >= 0 {
+                offset + d.t0 as f64 / 100.0
+            } else {
+                seg_start
+            };
+            let t1 = if d.t1 >= 0 {
+                offset + d.t1 as f64 / 100.0
+            } else {
+                seg_end
+            };
             match words.last_mut() {
                 Some(w) if !piece.starts_with(' ') => {
                     w.text.push_str(&piece);
                     w.end = t1;
                     w.prob = w.prob.min(d.p);
                 }
-                _ => words.push(Word { text: piece.trim_start().to_string(), start: t0, end: t1, prob: d.p }),
+                _ => words.push(Word {
+                    text: piece.trim_start().to_string(),
+                    start: t0,
+                    end: t1,
+                    prob: d.p,
+                }),
             }
         }
         words.retain(|w| !w.text.trim().is_empty());
-        out.push(Segment { start: seg_start, end: seg_end, text, no_speech_prob: seg.no_speech_probability(), words });
+        out.push(Segment {
+            start: seg_start,
+            end: seg_end,
+            text,
+            no_speech_prob: seg.no_speech_probability(),
+            words,
+        });
     }
 }
 
@@ -146,7 +174,10 @@ fn run(args: &Args) -> Result<()> {
     let mut cparams = WhisperContextParameters::default();
     cparams.use_gpu(!args.cpu);
     cparams.flash_attn(!args.cpu);
-    let model_path = args.model.to_str().context("model path is not valid UTF-8")?;
+    let model_path = args
+        .model
+        .to_str()
+        .context("model path is not valid UTF-8")?;
     let ctx = WhisperContext::new_with_params(model_path, cparams)
         .with_context(|| format!("loading model {}", args.model.display()))?;
     let mut state = ctx.create_state().context("creating whisper state")?;
@@ -155,7 +186,11 @@ fn run(args: &Args) -> Result<()> {
     let prompt = match &args.glossary {
         Some(p) => {
             let terms = load_glossary(p)?;
-            if terms.is_empty() { None } else { Some(format!("Glossary: {}.", terms.join(", "))) }
+            if terms.is_empty() {
+                None
+            } else {
+                Some(format!("Glossary: {}.", terms.join(", ")))
+            }
         }
         None => None,
     };
@@ -163,7 +198,10 @@ fn run(args: &Args) -> Result<()> {
     // Fresh parameters for every call (whisper consumes them).
     let build_params = |with_progress: bool| {
         let strategy = if args.beam > 1 {
-            SamplingStrategy::BeamSearch { beam_size: args.beam, patience: -1.0 }
+            SamplingStrategy::BeamSearch {
+                beam_size: args.beam,
+                patience: -1.0,
+            }
         } else {
             SamplingStrategy::Greedy { best_of: 1 }
         };
@@ -199,10 +237,13 @@ fn run(args: &Args) -> Result<()> {
     if let Some(vad_model) = &args.vad {
         // whisper.cpp only applies its VAD inside whisper_full(), not with a state, so we run the
         // detector ourselves and transcribe the speech regions (merged into chunks of <= 28 s).
-        let vad_path = vad_model.to_str().context("VAD model path is not valid UTF-8")?;
+        let vad_path = vad_model
+            .to_str()
+            .context("VAD model path is not valid UTF-8")?;
         let mut vctx_params = WhisperVadContextParams::new();
         vctx_params.set_use_gpu(false); // tiny model, CPU is fine
-        let mut vctx = WhisperVadContext::new(vad_path, vctx_params).context("loading VAD model")?;
+        let mut vctx =
+            WhisperVadContext::new(vad_path, vctx_params).context("loading VAD model")?;
         let mut vparams = WhisperVadParams::new();
         vparams.set_min_silence_duration(600);
         vparams.set_speech_pad(200);
@@ -229,12 +270,16 @@ fn run(args: &Args) -> Result<()> {
             if to <= from + 1_600 {
                 continue; // under 0.1 s
             }
-            state.full(build_params(false), &samples[from..to]).context("transcription failed")?;
+            state
+                .full(build_params(false), &samples[from..to])
+                .context("transcription failed")?;
             collect_segments(&state, *cs, &mut segments);
             event(json!({"event": "progress", "percent": (i + 1) * 100 / total}));
         }
     } else {
-        state.full(build_params(true), &samples).context("transcription failed")?;
+        state
+            .full(build_params(true), &samples)
+            .context("transcription failed")?;
         collect_segments(&state, 0.0, &mut segments);
     }
 
@@ -249,7 +294,8 @@ fn run(args: &Args) -> Result<()> {
     if let Some(dir) = args.out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&args.out, serde_json::to_string_pretty(&result)?).with_context(|| format!("writing {}", args.out.display()))?;
+    std::fs::write(&args.out, serde_json::to_string_pretty(&result)?)
+        .with_context(|| format!("writing {}", args.out.display()))?;
 
     event(json!({
         "event": "done",

@@ -21,7 +21,8 @@ pub const CHECK: &str = icon_src!(r#"<path d="M20 6 9 17l-5-5"/>"#);
 pub const CHEVRON_DOWN: &str = icon_src!(r#"<path d="m6 9 6 6 6-6"/>"#);
 pub const CHEVRON_UP: &str = icon_src!(r#"<path d="m18 15-6-6-6 6"/>"#);
 pub const ARROW_LEFT: &str = icon_src!(r#"<path d="M19 12H5M12 19l-7-7 7-7"/>"#);
-pub const DOWNLOAD: &str = icon_src!(r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>"#);
+pub const DOWNLOAD: &str =
+    icon_src!(r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>"#);
 pub const FOLDER: &str = icon_src!(
     r#"<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>"#
 );
@@ -45,7 +46,8 @@ pub const COPY: &str = icon_src!(
 pub const CPU: &str = icon_src!(
     r#"<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/>"#
 );
-pub const ALERT: &str = icon_src!(r#"<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>"#);
+pub const ALERT: &str =
+    icon_src!(r#"<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>"#);
 
 /// Spinner: a faint full ring with a bright quarter arc on top; rotate it to animate.
 pub const SPINNER: &str = icon_src!(
@@ -66,7 +68,8 @@ macro_rules! win_src {
 }
 
 pub const WIN_MINIMIZE: &str = win_src!(r#"<path d="M0.5 5.5h9"/>"#);
-pub const WIN_MAXIMIZE: &str = win_src!(r#"<rect x="0.55" y="0.55" width="8.9" height="8.9" rx="1.4"/>"#);
+pub const WIN_MAXIMIZE: &str =
+    win_src!(r#"<rect x="0.55" y="0.55" width="8.9" height="8.9" rx="1.4"/>"#);
 pub const WIN_RESTORE: &str = win_src!(
     r#"<path d="M2.6 2.5V2A1.45 1.45 0 0 1 4.05.55H8A1.45 1.45 0 0 1 9.45 2V6A1.45 1.45 0 0 1 8 7.45H7.5"/><rect x="0.55" y="2.55" width="6.9" height="6.9" rx="1.4"/>"#
 );

@@ -93,7 +93,11 @@ fn longest_match(
                 if j >= bhi {
                     break;
                 }
-                let k = if j > 0 { j2len.get(&(j - 1)).copied().unwrap_or(0) } else { 0 } + 1;
+                let k = if j > 0 {
+                    j2len.get(&(j - 1)).copied().unwrap_or(0)
+                } else {
+                    0
+                } + 1;
                 newj2len.insert(j, k);
                 if k > bestsize {
                     besti = i + 1 - k;
@@ -110,7 +114,10 @@ fn longest_match(
         bestj -= 1;
         bestsize += 1;
     }
-    while besti + bestsize < ahi && bestj + bestsize < bhi && a[besti + bestsize] == b[bestj + bestsize] {
+    while besti + bestsize < ahi
+        && bestj + bestsize < bhi
+        && a[besti + bestsize] == b[bestj + bestsize]
+    {
         bestsize += 1;
     }
     (besti, bestj, bestsize)
@@ -137,19 +144,33 @@ pub fn acceptable_edit(old: &str, new: &str) -> bool {
 }
 
 /// If this line continues an unfinished sentence, undo a capital the model added.
-pub fn fix_continuation_case(prev: &str, old: &str, new: &str, keep_caps: &HashSet<String>) -> String {
+pub fn fix_continuation_case(
+    prev: &str,
+    old: &str,
+    new: &str,
+    keep_caps: &HashSet<String>,
+) -> String {
     if prev.is_empty() || old.is_empty() || new.is_empty() {
         return new.to_string();
     }
     // Python: `prev.rstrip()[-1:] in ".?!"` is also true for an empty string
-    let prev_ends_sentence = prev.trim_end().chars().last().is_none_or(|c| ".?!".contains(c));
+    let prev_ends_sentence = prev
+        .trim_end()
+        .chars()
+        .last()
+        .is_none_or(|c| ".?!".contains(c));
     let old_first = old.chars().next().unwrap();
     let new_first = new.chars().next().unwrap();
     if prev_ends_sentence || !old_first.is_lowercase() || !new_first.is_uppercase() {
         return new.to_string();
     }
-    let Some(token) = new.split_whitespace().next() else { return new.to_string() };
-    let first: String = token.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '\'').collect();
+    let Some(token) = new.split_whitespace().next() else {
+        return new.to_string();
+    };
+    let first: String = token
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '\'')
+        .collect();
     if first == "I" || first.starts_with("I'") || keep_caps.contains(&first.to_lowercase()) {
         return new.to_string();
     }
@@ -168,7 +189,10 @@ mod tests {
 
     #[test]
     fn norm_words_drops_fillers_and_punctuation() {
-        assert_eq!(norm_words("Uh, I'm gonna - um - merge it."), vec!["i'm", "gonna", "merge", "it"]);
+        assert_eq!(
+            norm_words("Uh, I'm gonna - um - merge it."),
+            vec!["i'm", "gonna", "merge", "it"]
+        );
         assert!(norm_words("uh um").is_empty());
     }
 
@@ -178,7 +202,12 @@ mod tests {
         assert!((sequence_ratio(&w("a b c d"), &w("a b c d")) - 1.0).abs() < 1e-12);
         assert!((sequence_ratio(&w("a b c d"), &w("a x c d")) - 0.75).abs() < 1e-12);
         assert!((sequence_ratio(&w("a b c d"), &w("d c b a")) - 0.25).abs() < 1e-12);
-        assert!((sequence_ratio(&w("the cat sat on the mat"), &w("the cat sat on a mat")) - 10.0 / 12.0).abs() < 1e-12);
+        assert!(
+            (sequence_ratio(&w("the cat sat on the mat"), &w("the cat sat on a mat"))
+                - 10.0 / 12.0)
+                .abs()
+                < 1e-12
+        );
         assert!((sequence_ratio(&w("a b c"), &w("x y z")) - 0.0).abs() < 1e-12);
         // classic difflib example: "abcd" vs "bcde" -> 0.75
         assert!((sequence_ratio(&w("a b c d"), &w("b c d e")) - 0.75).abs() < 1e-12);
@@ -186,36 +215,69 @@ mod tests {
 
     #[test]
     fn accepts_small_fixes_rejects_rewrites() {
-        assert!(acceptable_edit("so we merge the pr uh today", "So we merge the PR today."));
-        assert!(acceptable_edit("i think its a web hook issue", "I think it's a webhook issue."));
+        assert!(acceptable_edit(
+            "so we merge the pr uh today",
+            "So we merge the PR today."
+        ));
+        assert!(acceptable_edit(
+            "i think its a web hook issue",
+            "I think it's a webhook issue."
+        ));
         // rewrite / summary
-        assert!(!acceptable_edit("yeah i think we should probably deploy that on friday", "Deploy on Friday."));
+        assert!(!acceptable_edit(
+            "yeah i think we should probably deploy that on friday",
+            "Deploy on Friday."
+        ));
         // deleted everything / nothing but fillers
         assert!(!acceptable_edit("okay", ""));
         assert!(!acceptable_edit("uh um", "Um."));
         // too many words invented
-        assert!(!acceptable_edit("okay", "okay that sounds good to me let us do that"));
+        assert!(!acceptable_edit(
+            "okay",
+            "okay that sounds good to me let us do that"
+        ));
     }
 
     #[test]
     fn rejects_stripped_punctuation() {
         let old = "Well, I think, honestly, that it works.";
         assert!(!acceptable_edit(old, "Well I think honestly that it works"));
-        assert!(acceptable_edit(old, "Well, I think, honestly, that it works!"));
+        assert!(acceptable_edit(
+            old,
+            "Well, I think, honestly, that it works!"
+        ));
     }
 
     #[test]
     fn continuation_case_is_undone_only_mid_sentence() {
         let keep: HashSet<String> = ["cloudflare".to_string()].into();
         // previous line unfinished, original lowercase, model capitalised -> lowercase it again
-        assert_eq!(fix_continuation_case("we should go to", "the store", "The store.", &keep), "the store.");
+        assert_eq!(
+            fix_continuation_case("we should go to", "the store", "The store.", &keep),
+            "the store."
+        );
         // previous line finished a sentence -> keep
-        assert_eq!(fix_continuation_case("that is all.", "the store", "The store.", &keep), "The store.");
+        assert_eq!(
+            fix_continuation_case("that is all.", "the store", "The store.", &keep),
+            "The store."
+        );
         // "I", glossary terms and original capitals are kept
-        assert_eq!(fix_continuation_case("and then", "i left", "I left.", &keep), "I left.");
-        assert_eq!(fix_continuation_case("we use", "cloudflare for it", "Cloudflare for it.", &keep), "Cloudflare for it.");
-        assert_eq!(fix_continuation_case("we use", "Docker", "Docker", &keep), "Docker");
+        assert_eq!(
+            fix_continuation_case("and then", "i left", "I left.", &keep),
+            "I left."
+        );
+        assert_eq!(
+            fix_continuation_case("we use", "cloudflare for it", "Cloudflare for it.", &keep),
+            "Cloudflare for it."
+        );
+        assert_eq!(
+            fix_continuation_case("we use", "Docker", "Docker", &keep),
+            "Docker"
+        );
         // no previous line
-        assert_eq!(fix_continuation_case("", "the store", "The store.", &keep), "The store.");
+        assert_eq!(
+            fix_continuation_case("", "the store", "The store.", &keep),
+            "The store."
+        );
     }
 }

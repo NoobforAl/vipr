@@ -37,7 +37,10 @@ impl ModelStore {
         if let Some(d) = std::env::var_os("MT_MODELS_DIR") {
             return PathBuf::from(d);
         }
-        dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join(crate::APP_DIR_NAME).join("models")
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(crate::APP_DIR_NAME)
+            .join("models")
     }
 
     pub fn dir(&self) -> &Path {
@@ -60,10 +63,16 @@ impl ModelStore {
     pub fn status(&self, e: &ModelEntry) -> Status {
         let path = self.path_for(e);
         if matches!(e.source, Source::Local { .. }) {
-            return if path.is_file() { Status::Present } else { Status::LocalMissing };
+            return if path.is_file() {
+                Status::Present
+            } else {
+                Status::LocalMissing
+            };
         }
         match fs::metadata(&path) {
-            Ok(m) if m.is_file() && (e.size_bytes == 0 || m.len() == e.size_bytes) => Status::Present,
+            Ok(m) if m.is_file() && (e.size_bytes == 0 || m.len() == e.size_bytes) => {
+                Status::Present
+            }
             _ => match fs::metadata(self.part_path(e)) {
                 Ok(m) => Status::Partial(m.len()),
                 Err(_) => Status::Missing,
@@ -73,7 +82,9 @@ impl ModelStore {
 
     /// Hash the file on disk. `Ok(None)` if the entry has no hash to compare with.
     pub fn verify(&self, e: &ModelEntry) -> Result<Option<bool>> {
-        let Some(expected) = &e.sha256 else { return Ok(None) };
+        let Some(expected) = &e.sha256 else {
+            return Ok(None);
+        };
         let actual = sha256_file(&self.path_for(e))?;
         Ok(Some(&actual == expected))
     }
@@ -81,9 +92,24 @@ impl ModelStore {
     /// Download (or resume) a model and check its hash. Returns the final path.
     /// `progress(done, total)` is called about every 256 KiB; `total` is 0 when unknown.
     /// `hf_token` is only sent to huggingface.co.
-    pub fn fetch(&self, e: &ModelEntry, hf_token: Option<&str>, progress: &mut dyn FnMut(u64, u64)) -> Result<PathBuf> {
-        let url = e.download_url().ok_or_else(|| Error::NotDownloadable(e.id.clone()))?;
-        self.fetch_file(&e.id, &url, &self.path_for(e), e.size_bytes, e.sha256.as_deref(), hf_token, progress)
+    pub fn fetch(
+        &self,
+        e: &ModelEntry,
+        hf_token: Option<&str>,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<PathBuf> {
+        let url = e
+            .download_url()
+            .ok_or_else(|| Error::NotDownloadable(e.id.clone()))?;
+        self.fetch_file(
+            &e.id,
+            &url,
+            &self.path_for(e),
+            e.size_bytes,
+            e.sha256.as_deref(),
+            hf_token,
+            progress,
+        )
     }
 
     /// Download any file: resumable (`<path>.part` + Range), size and SHA-256 checked, moved into place when complete.
@@ -105,15 +131,17 @@ impl ModelStore {
             p.push(".part");
             PathBuf::from(p)
         };
-        fs::create_dir_all(final_path.parent().unwrap_or(Path::new("."))).map_err(io_err(&final_path))?;
+        fs::create_dir_all(final_path.parent().unwrap_or(Path::new(".")))
+            .map_err(io_err(&final_path))?;
 
         // already complete and correct?
-        if let Ok(meta) = fs::metadata(&final_path) {
-            if meta.is_file() && (size_bytes == 0 || meta.len() == size_bytes) {
-                match sha256 {
-                    Some(expected) if sha256_file(&final_path)? != expected => {}
-                    _ => return Ok(final_path),
-                }
+        if let Ok(meta) = fs::metadata(&final_path)
+            && meta.is_file()
+            && (size_bytes == 0 || meta.len() == size_bytes)
+        {
+            match sha256 {
+                Some(expected) if sha256_file(&final_path)? != expected => {}
+                _ => return Ok(final_path),
             }
         }
         let _ = fs::remove_file(&final_path); // wrong size / hash: start again
@@ -156,14 +184,25 @@ impl ModelStore {
             if !resumed {
                 have = 0; // server ignored the Range header: it sends the whole file
             }
-            let total = if size_bytes > 0 { size_bytes } else { have + resp.content_length().unwrap_or(0) };
-            let mut out = if resumed { OpenOptions::new().append(true).open(&part) } else { File::create(&part) }.map_err(io_err(&part))?;
+            let total = if size_bytes > 0 {
+                size_bytes
+            } else {
+                have + resp.content_length().unwrap_or(0)
+            };
+            let mut out = if resumed {
+                OpenOptions::new().append(true).open(&part)
+            } else {
+                File::create(&part)
+            }
+            .map_err(io_err(&part))?;
 
             let mut buf = vec![0u8; 256 * 1024];
             let mut done = have;
             progress(done, total);
             loop {
-                let n = resp.read(&mut buf).map_err(|x| Error::Http(format!("connection lost: {x} (run again to resume)")))?;
+                let n = resp.read(&mut buf).map_err(|x| {
+                    Error::Http(format!("connection lost: {x} (run again to resume)"))
+                })?;
                 if n == 0 {
                     break;
                 }
@@ -177,13 +216,19 @@ impl ModelStore {
 
         let size = fs::metadata(&part).map_err(io_err(&part))?.len();
         if size_bytes > 0 && size != size_bytes {
-            return Err(Error::Http(format!("incomplete download: got {size} of {size_bytes} bytes (run again to resume)")));
+            return Err(Error::Http(format!(
+                "incomplete download: got {size} of {size_bytes} bytes (run again to resume)"
+            )));
         }
         if let Some(expected) = sha256 {
             let actual = sha256_file(&part)?;
             if actual != expected {
                 let _ = fs::remove_file(&part);
-                return Err(Error::HashMismatch { id: id.to_string(), expected: expected.to_string(), actual });
+                return Err(Error::HashMismatch {
+                    id: id.to_string(),
+                    expected: expected.to_string(),
+                    actual,
+                });
             }
         }
         fs::rename(&part, &final_path).map_err(io_err(&final_path))?;
@@ -202,7 +247,11 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 #[cfg(test)]
@@ -217,7 +266,9 @@ mod tests {
             name: "t".into(),
             roles: vec![Role::Llm],
             format: Format::Gguf,
-            source: Source::Local { path: path.display().to_string() },
+            source: Source::Local {
+                path: path.display().to_string(),
+            },
             filename: None,
             size_bytes: 0,
             sha256: None,
@@ -235,7 +286,10 @@ mod tests {
     fn sha256_of_known_content() {
         let p = std::env::temp_dir().join("mt_sha_test.txt");
         fs::write(&p, b"abc").unwrap();
-        assert_eq!(sha256_file(&p).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256_file(&p).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let _ = fs::remove_file(&p);
     }
 
@@ -244,6 +298,9 @@ mod tests {
         let store = ModelStore::new(std::env::temp_dir().join("mt_store_test"));
         let e = entry(Path::new("does-not-exist.gguf"));
         assert_eq!(store.status(&e), Status::LocalMissing);
-        assert!(matches!(store.fetch(&e, None, &mut |_, _| {}), Err(Error::NotDownloadable(_))));
+        assert!(matches!(
+            store.fetch(&e, None, &mut |_, _| {}),
+            Err(Error::NotDownloadable(_))
+        ));
     }
 }

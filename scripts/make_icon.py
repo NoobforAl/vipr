@@ -20,9 +20,9 @@ from PIL import Image, ImageDraw
 
 OUT = Path(__file__).resolve().parent.parent / "assets" / "icon"
 
-TOP = (160, 196, 252)      # gradient top    (#A0C4FC)
-BOTTOM = (104, 148, 232)   # gradient bottom (#6894E8)
-INK = (21, 23, 28)         # same dark as the app background (#15171C)
+TOP = (160, 196, 252)  # gradient top    (#A0C4FC)
+BOTTOM = (104, 148, 232)  # gradient bottom (#6894E8)
+INK = (21, 23, 28)  # same dark as the app background (#15171C)
 
 # the sidebar waveform: bars at x = 2, 6, 10, 14, 18, 22 with these (top, bottom) in a 24 x 24 grid
 BARS = [(10, 13), (6, 17), (3, 21), (8, 16), (5, 18), (10, 13)]
@@ -44,12 +44,19 @@ def draw(size: int) -> Image.Image:
     gp = grad.load()
     for y in range(s):
         t = y / (s - 1)
-        row = (lerp(TOP[0], BOTTOM[0], t), lerp(TOP[1], BOTTOM[1], t), lerp(TOP[2], BOTTOM[2], t), 255)
+        row = (
+            lerp(TOP[0], BOTTOM[0], t),
+            lerp(TOP[1], BOTTOM[1], t),
+            lerp(TOP[2], BOTTOM[2], t),
+            255,
+        )
         for x in range(s):
             gp[x, y] = row
     mask = Image.new("L", (s, s), 0)
     margin = s * 0.03
-    ImageDraw.Draw(mask).rounded_rectangle([margin, margin, s - margin, s - margin], radius=s * 0.225, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [margin, margin, s - margin, s - margin], radius=s * 0.225, fill=255
+    )
     img.paste(grad, (0, 0), mask)
 
     # waveform
@@ -62,7 +69,11 @@ def draw(size: int) -> Image.Image:
         bx = cx + (x - 12) * unit
         half = ((y1 - y0) / 2 + 1.1) * unit  # round caps add a little length
         mid = cy + ((y0 + y1) / 2 - 12) * unit
-        d.rounded_rectangle([bx - thick / 2, mid - half, bx + thick / 2, mid + half], radius=thick / 2, fill=INK + (255,))
+        d.rounded_rectangle(
+            [bx - thick / 2, mid - half, bx + thick / 2, mid + half],
+            radius=thick / 2,
+            fill=INK + (255,),
+        )
 
     return img.resize((size, size), Image.LANCZOS)
 
@@ -81,7 +92,9 @@ def write_ico(path: Path, sizes: list[int]) -> None:
     entries = b""
     data = b""
     for n, blob in blobs:
-        entries += struct.pack("<BBBBHHII", n % 256, n % 256, 0, 0, 1, 32, len(blob), offset + len(data))
+        entries += struct.pack(
+            "<BBBBHHII", n % 256, n % 256, 0, 0, 1, 32, len(blob), offset + len(data)
+        )
         data += blob
     path.write_bytes(head + entries + data)
 
@@ -93,7 +106,9 @@ def svg() -> str:
         bx = 512 + (x - 12) * unit
         half = ((y1 - y0) / 2 + 1.1) * unit
         mid = 512 + ((y0 + y1) / 2 - 12) * unit
-        bars.append(f'<line x1="{bx:.1f}" y1="{mid - half + 1.35 * unit:.1f}" x2="{bx:.1f}" y2="{mid + half - 1.35 * unit:.1f}"/>')
+        bars.append(
+            f'<line x1="{bx:.1f}" y1="{mid - half + 1.35 * unit:.1f}" x2="{bx:.1f}" y2="{mid + half - 1.35 * unit:.1f}"/>'
+        )
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">'
         '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'

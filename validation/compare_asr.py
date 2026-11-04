@@ -19,7 +19,11 @@ FILLERS = {"uh", "um", "uhm", "umm", "erm", "uhh", "hmm", "mm"}
 
 
 def words(text: str) -> list[str]:
-    return [w for w in re.findall(r"[a-z0-9']+", text.lower().replace("\u2019", "'")) if w not in FILLERS]
+    return [
+        w
+        for w in re.findall(r"[a-z0-9']+", text.lower().replace("\u2019", "'"))
+        if w not in FILLERS
+    ]
 
 
 def edit_distance(a: list[str], b: list[str]) -> int:
@@ -51,11 +55,17 @@ def main() -> None:
     print(f"meeting        : {name}")
     print(f"model          : {data.get('model')}")
     print(f"audio          : {data['audio_seconds']:.0f} s")
-    print(f"Rust ASR time  : {data['elapsed_seconds']:.1f} s  ({data['audio_seconds'] / data['elapsed_seconds']:.1f}x real time)")
+    print(
+        f"Rust ASR time  : {data['elapsed_seconds']:.1f} s  ({data['audio_seconds'] / data['elapsed_seconds']:.1f}x real time)"
+    )
     print(f"words          : python {len(ref)}  |  rust {len(hyp)}")
-    print(f"disagreement   : {d / max(1, len(ref)) * 100:.1f}% (word edit distance / python words; lower = more similar)")
+    print(
+        f"disagreement   : {d / max(1, len(ref)) * 100:.1f}% (word edit distance / python words; lower = more similar)"
+    )
     with_words = sum(1 for s in data["segments"] if s.get("words"))
-    print(f"segments       : {len(data['segments'])} ({with_words} with word timestamps)")
+    print(
+        f"segments       : {len(data['segments'])} ({with_words} with word timestamps)"
+    )
 
 
 if __name__ == "__main__":

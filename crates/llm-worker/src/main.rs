@@ -78,7 +78,8 @@ fn main() {
 
 /// One item per line or comma separated, `#` starts a comment (same format as the Python pipeline / asr-worker).
 fn load_glossary_file(path: &Path) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading glossary {}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading glossary {}", path.display()))?;
     let mut terms = Vec::new();
     for line in text.trim_start_matches('\u{feff}').lines() {
         for t in line.split('#').next().unwrap_or("").split(',') {
@@ -93,8 +94,10 @@ fn load_glossary_file(path: &Path) -> Result<Vec<String>> {
 
 fn run(args: &Args) -> Result<()> {
     let started = Instant::now();
-    let text = std::fs::read_to_string(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
-    let input: Input = serde_json::from_str(&text).with_context(|| format!("parsing {}", args.input.display()))?;
+    let text = std::fs::read_to_string(&args.input)
+        .with_context(|| format!("reading {}", args.input.display()))?;
+    let input: Input =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", args.input.display()))?;
     if input.utterances.is_empty() {
         bail!("the input has no utterances");
     }
@@ -106,9 +109,13 @@ fn run(args: &Args) -> Result<()> {
     let glossary = prompts::merge_glossary([input.glossary.as_slice(), file_glossary.as_slice()]);
 
     let prompts_dir = args.prompts_dir.clone().or_else(prompts::locate_dir);
-    let (category, found) = prompts::load_category_or_default(prompts_dir.as_deref(), input.about.category.as_deref());
+    let (category, found) =
+        prompts::load_category_or_default(prompts_dir.as_deref(), input.about.category.as_deref());
     if !found {
-        eprintln!("warning: prompt category {:?} not found, using the default", input.about.category);
+        eprintln!(
+            "warning: prompt category {:?} not found, using the default",
+            input.about.category
+        );
     }
 
     let mut labels: Vec<String> = Vec::new();
@@ -137,7 +144,8 @@ fn run(args: &Args) -> Result<()> {
     if let Some(dir) = args.out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&args.out, serde_json::to_string_pretty(&output)?).with_context(|| format!("writing {}", args.out.display()))?;
+    std::fs::write(&args.out, serde_json::to_string_pretty(&output)?)
+        .with_context(|| format!("writing {}", args.out.display()))?;
 
     event(json!({
         "event": "done",

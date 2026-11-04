@@ -34,8 +34,10 @@ MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 LINE_RE = re.compile(r"^\[(\d\d:\d\d:\d\d)\] (Speaker \d+): (.*)$")
 OUT_RE = re.compile(r"^\s*(\d+)\s*\|\s*(Speaker \d+)\s*\|\s*(.*?)\s*$")
 FILLERS = {"uh", "um", "uhm", "erm", "umm", "uhh"}
-MAX_FLIP_WORDS = 12      # only short lines may change speaker
-MAX_FLIP_FRACTION = 0.3  # if more than this share of a chunk flips, the model is guessing
+MAX_FLIP_WORDS = 12  # only short lines may change speaker
+MAX_FLIP_FRACTION = (
+    0.3  # if more than this share of a chunk flips, the model is guessing
+)
 
 SYSTEM_PROMPT = """You are a careful editor of automatic speech-recognition (ASR) transcripts of English \
 meetings between two people (Speaker 1 and Speaker 2), usually about software development.
@@ -98,9 +100,9 @@ def acceptable_edit(old: str, new: str) -> bool:
     """Reject rewrites: the corrected line must stay close to what was said."""
     wo, wn = norm_words(old), norm_words(new)
     if not wo:
-        return False          # nothing but fillers: leave as is
+        return False  # nothing but fillers: leave as is
     if not wn:
-        return False          # model deleted the content
+        return False  # model deleted the content
     ratio = difflib.SequenceMatcher(None, wo, wn).ratio()
     if not (ratio >= 0.6 and 0.6 <= len(wn) / len(wo) <= 1.5):
         return False
@@ -129,7 +131,9 @@ def fix_continuation_case(prev: str, old: str, new: str, keep_caps: set[str]) ->
 class Refiner:
     def __init__(self, model_id: str, glossary: list[str]) -> None:
         if not torch.cuda.is_available():
-            sys.exit("Refining needs a CUDA GPU (4-bit quantisation). CUDA is not available.")
+            sys.exit(
+                "Refining needs a CUDA GPU (4-bit quantisation). CUDA is not available."
+            )
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         print(f"[llm] loading {model_id} (4-bit)")
@@ -149,24 +153,37 @@ class Refiner:
 
     @torch.inference_mode()
     def _chat(self, user: str, max_new: int) -> str:
-        msgs = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
+        msgs = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ]
         enc = self.tok.apply_chat_template(
             msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True
         ).to(self.model.device)
         out = self.model.generate(
-            **enc, max_new_tokens=max_new, do_sample=False,
-            temperature=None, top_p=None, top_k=None,
+            **enc,
+            max_new_tokens=max_new,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
         )
-        return self.tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+        return self.tok.decode(
+            out[0, enc["input_ids"].shape[1] :], skip_special_tokens=True
+        )
 
-    def _try(self, idx: list[int], utts: list[Utt], context: list[Utt]) -> dict[int, tuple[str, str]] | None:
+    def _try(
+        self, idx: list[int], utts: list[Utt], context: list[Utt]
+    ) -> dict[int, tuple[str, str]] | None:
         lines = [f"{i}|{utts[i].new_speaker}|{utts[i].new_text}" for i in idx]
         parts = []
         if self.glossary:
             parts.append("Glossary (preferred spellings): " + ", ".join(self.glossary))
         if context:
-            parts.append("Previous lines (context only, do NOT output them):\n"
-                         + "\n".join(f"{u.new_speaker}: {u.new_text}" for u in context))
+            parts.append(
+                "Previous lines (context only, do NOT output them):\n"
+                + "\n".join(f"{u.new_speaker}: {u.new_text}" for u in context)
+            )
         parts.append("Lines to fix:\n" + "\n".join(lines))
         expected_tokens = len(self.tok("\n".join(lines))["input_ids"])
         reply = self._chat("\n\n".join(parts), max_new=int(expected_tokens * 1.4) + 64)
@@ -180,30 +197,40 @@ class Refiner:
             return None
         return parsed
 
-    def refine_chunk(self, idx: list[int], utts: list[Utt], context: list[Utt]) -> dict[int, tuple[str, str]]:
+    def refine_chunk(
+        self, idx: list[int], utts: list[Utt], context: list[Utt]
+    ) -> dict[int, tuple[str, str]]:
         result = self._try(idx, utts, context)
         if result is not None:
             return result
         if len(idx) == 1:
-            return {}                       # give up on this line, keep the original
-        mid = len(idx) // 2                 # model broke the format -> split and retry
+            return {}  # give up on this line, keep the original
+        mid = len(idx) // 2  # model broke the format -> split and retry
         left = self.refine_chunk(idx[:mid], utts, context)
-        right = self.refine_chunk(idx[mid:], utts, context + [utts[i] for i in idx[:mid]][-4:])
+        right = self.refine_chunk(
+            idx[mid:], utts, context + [utts[i] for i in idx[:mid]][-4:]
+        )
         return {**left, **right}
 
 
 # --------------------------------------------------------------------------- driver
-def refine_utterances(refiner: Refiner, utts: list[Utt], chunk_lines: int, log: list[str]) -> dict[str, int]:
+def refine_utterances(
+    refiner: Refiner, utts: list[Utt], chunk_lines: int, log: list[str]
+) -> dict[str, int]:
     labels = {u.speaker for u in utts}
     stats = {"text": 0, "speaker": 0, "rejected": 0, "skipped": 0}
     starts = range(0, len(utts), chunk_lines)
     for start in tqdm(starts, desc="  refining", unit="chunk", leave=False):
         idx = list(range(start, min(start + chunk_lines, len(utts))))
-        context = utts[max(0, start - 4):start]
+        context = utts[max(0, start - 4) : start]
         result = refiner.refine_chunk(idx, utts, context)
         stats["skipped"] += len(idx) - len(result)
 
-        flips = [i for i, (spk, _) in result.items() if spk in labels and spk != utts[i].speaker]
+        flips = [
+            i
+            for i, (spk, _) in result.items()
+            if spk in labels and spk != utts[i].speaker
+        ]
         allow_flips = len(flips) <= max(1, int(MAX_FLIP_FRACTION * len(idx)))
 
         keep_caps = {w.lower() for term in refiner.glossary for w in term.split()}
@@ -211,7 +238,9 @@ def refine_utterances(refiner: Refiner, utts: list[Utt], chunk_lines: int, log: 
             spk, text = result[i]
             u = utts[i]
             if i > 0:
-                text = fix_continuation_case(utts[i - 1].new_text, u.text, text, keep_caps)
+                text = fix_continuation_case(
+                    utts[i - 1].new_text, u.text, text, keep_caps
+                )
             if text != u.text:
                 if acceptable_edit(u.text, text):
                     u.new_text = text
@@ -219,18 +248,24 @@ def refine_utterances(refiner: Refiner, utts: list[Utt], chunk_lines: int, log: 
                     log.append(f"[{u.time}] #{i} TEXT\n   - {u.text}\n   + {text}")
                 else:
                     stats["rejected"] += 1
-                    log.append(f"[{u.time}] #{i} REJECTED rewrite\n   - {u.text}\n   ? {text}")
+                    log.append(
+                        f"[{u.time}] #{i} REJECTED rewrite\n   - {u.text}\n   ? {text}"
+                    )
             if spk != u.speaker and spk in labels:
                 if allow_flips and len(u.text.split()) <= MAX_FLIP_WORDS:
                     u.new_speaker = spk
                     stats["speaker"] += 1
-                    log.append(f"[{u.time}] #{i} SPEAKER {u.speaker} -> {spk}: {u.new_text}")
+                    log.append(
+                        f"[{u.time}] #{i} SPEAKER {u.speaker} -> {spk}: {u.new_text}"
+                    )
                 else:
                     stats["rejected"] += 1
     return stats
 
 
-def write_refined(path: Path, header: list[str], utts: list[Utt], model_id: str) -> None:
+def write_refined(
+    path: Path, header: list[str], utts: list[Utt], model_id: str
+) -> None:
     head = header[:-1] + [f"Refined : {model_id.split('/')[-1]}", header[-1]]
     lines = [*head, ""]
     for u in utts:
@@ -238,8 +273,14 @@ def write_refined(path: Path, header: list[str], utts: list[Utt], model_id: str)
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def refine_paths(paths: list[Path], out_dir: Path, glossary: list[str], model_id: str = MODEL_ID,
-                 force: bool = False, chunk_lines: int = 20) -> list[Path]:
+def refine_paths(
+    paths: list[Path],
+    out_dir: Path,
+    glossary: list[str],
+    model_id: str = MODEL_ID,
+    force: bool = False,
+    chunk_lines: int = 20,
+) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     todo = [p for p in paths if force or not (out_dir / p.name).exists()]
     outputs = [out_dir / p.name for p in paths]
@@ -255,18 +296,26 @@ def refine_paths(paths: list[Path], out_dir: Path, glossary: list[str], model_id
             t0, log = time.time(), []
             stats = refine_utterances(refiner, utts, chunk_lines, log)
             write_refined(dst, header, utts, model_id)
-            dst.with_suffix(".changes.log").write_text("\n\n".join(log), encoding="utf-8")
-            print(f"  saved {dst}  ({(time.time() - t0) / 60:.1f} min) "
-                  f"text edits={stats['text']} speaker fixes={stats['speaker']} "
-                  f"rejected={stats['rejected']} skipped={stats['skipped']}")
+            dst.with_suffix(".changes.log").write_text(
+                "\n\n".join(log), encoding="utf-8"
+            )
+            print(
+                f"  saved {dst}  ({(time.time() - t0) / 60:.1f} min) "
+                f"text edits={stats['text']} speaker fixes={stats['speaker']} "
+                f"rejected={stats['rejected']} skipped={stats['skipped']}"
+            )
     else:
         print("Nothing to refine (use --force to redo).")
 
     done = [o for o in outputs if o.exists()]
     if done:
         combined = out_dir / "ALL_MEETINGS_refined.txt"
-        combined.write_text(("\n\n" + "#" * 70 + "\n\n").join(
-            o.read_text(encoding="utf-8") for o in sorted(done)), encoding="utf-8")
+        combined.write_text(
+            ("\n\n" + "#" * 70 + "\n\n").join(
+                o.read_text(encoding="utf-8") for o in sorted(done)
+            ),
+            encoding="utf-8",
+        )
         print(f"Combined file: {combined}")
     return done
 
@@ -274,27 +323,48 @@ def refine_paths(paths: list[Path], out_dir: Path, glossary: list[str], model_id
 def main() -> None:
     from transcribe_meetings import ROOT, load_glossary  # also loads .env
 
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("inputs", nargs="*", default=[str(ROOT / "transcripts")], help="transcript .txt files or folders")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "inputs",
+        nargs="*",
+        default=[str(ROOT / "transcripts")],
+        help="transcript .txt files or folders",
+    )
     ap.add_argument("-o", "--output-dir", default=str(ROOT / "refined"))
-    ap.add_argument("--model", default=MODEL_ID, help=f"HF causal LM (default: {MODEL_ID})")
+    ap.add_argument(
+        "--model", default=MODEL_ID, help=f"HF causal LM (default: {MODEL_ID})"
+    )
     ap.add_argument("--glossary", default=str(ROOT / "glossary.txt"))
-    ap.add_argument("--chunk-lines", type=int, default=20, help="lines per LLM call (default 20)")
+    ap.add_argument(
+        "--chunk-lines", type=int, default=20, help="lines per LLM call (default 20)"
+    )
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
     paths: list[Path] = []
     for p in map(Path, args.inputs):
         if p.is_dir():
-            paths += [f for f in sorted(p.glob("*.txt")) if not f.name.startswith("ALL_MEETINGS")]
+            paths += [
+                f
+                for f in sorted(p.glob("*.txt"))
+                if not f.name.startswith("ALL_MEETINGS")
+            ]
         elif p.is_file():
             paths.append(p)
         else:
             sys.exit(f"Not found: {p}")
     if not paths:
         sys.exit("No transcripts found. Run transcribe_meetings.py first.")
-    refine_paths(paths, Path(args.output_dir), load_glossary(Path(args.glossary)),
-                 args.model, args.force, args.chunk_lines)
+    refine_paths(
+        paths,
+        Path(args.output_dir),
+        load_glossary(Path(args.glossary)),
+        args.model,
+        args.force,
+        args.chunk_lines,
+    )
 
 
 if __name__ == "__main__":

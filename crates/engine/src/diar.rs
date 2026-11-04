@@ -28,8 +28,10 @@ pub struct DiarResult {
 impl DiarResult {
     pub fn load(path: &std::path::Path) -> crate::Result<DiarResult> {
         let text = std::fs::read_to_string(path).map_err(crate::io_err(path))?;
-        serde_json::from_str(&text)
-            .map_err(|e| crate::Error::Registry { path: path.display().to_string(), msg: e.to_string() })
+        serde_json::from_str(&text).map_err(|e| crate::Error::Registry {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })
     }
 }
 
@@ -89,9 +91,21 @@ mod tests {
 
     fn turns() -> Vec<DiarTurn> {
         vec![
-            DiarTurn { start: 0.0, end: 4.0, speaker: 0 },
-            DiarTurn { start: 4.0, end: 6.0, speaker: 1 },
-            DiarTurn { start: 8.0, end: 10.0, speaker: 0 },
+            DiarTurn {
+                start: 0.0,
+                end: 4.0,
+                speaker: 0,
+            },
+            DiarTurn {
+                start: 4.0,
+                end: 6.0,
+                speaker: 1,
+            },
+            DiarTurn {
+                start: 8.0,
+                end: 10.0,
+                speaker: 0,
+            },
         ]
     }
 

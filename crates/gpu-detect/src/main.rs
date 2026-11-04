@@ -11,8 +11,15 @@ fn main() {
         println!("GPUs: none");
     }
     for (i, g) in d.gpus.iter().enumerate() {
-        let mark = if d.recommended_gpu == Some(i) { "*" } else { " " };
-        let vram = g.vram_mb.map(|m| format!("{m} MiB")).unwrap_or_else(|| "VRAM unknown".into());
+        let mark = if d.recommended_gpu == Some(i) {
+            "*"
+        } else {
+            " "
+        };
+        let vram = g
+            .vram_mb
+            .map(|m| format!("{m} MiB"))
+            .unwrap_or_else(|| "VRAM unknown".into());
         println!(
             "{mark} [{i}] {} | {:?} | {vram}{} | via {:?}",
             g.name,
@@ -21,7 +28,11 @@ fn main() {
             g.source
         );
         if let Some(c) = &g.compute_capability {
-            println!("      compute capability {c}, driver {}, CUDA {}", g.driver.as_deref().unwrap_or("?"), g.cuda_driver.as_deref().unwrap_or("?"));
+            println!(
+                "      compute capability {c}, driver {}, CUDA {}",
+                g.driver.as_deref().unwrap_or("?"),
+                g.cuda_driver.as_deref().unwrap_or("?")
+            );
         }
     }
     println!("Backend: {}  ({})", d.recommended.as_str(), d.reason);

@@ -67,13 +67,21 @@ impl WindowSeg {
 
     /// Seconds in which local speaker `local` speaks alone.
     pub fn clean_seconds(&self, local: usize) -> f64 {
-        self.classes.iter().filter(|&&c| class_members(c as usize) == [local]).count() as f64 * FRAME_STEP as f64
+        self.classes
+            .iter()
+            .filter(|&&c| class_members(c as usize) == [local])
+            .count() as f64
+            * FRAME_STEP as f64
             / SAMPLE_RATE
     }
 
     /// Seconds in which local speaker `local` speaks at all (alone or in an overlap).
     pub fn active_seconds(&self, local: usize) -> f64 {
-        self.classes.iter().filter(|&&c| class_members(c as usize).contains(&local)).count() as f64 * FRAME_STEP as f64
+        self.classes
+            .iter()
+            .filter(|&&c| class_members(c as usize).contains(&local))
+            .count() as f64
+            * FRAME_STEP as f64
             / SAMPLE_RATE
     }
 }
@@ -101,7 +109,12 @@ pub struct Clustering {
 
 /// Cosine k-means on unit vectors with per-point weights and farthest-point initialisation.
 /// `embs` must be normalised. `k` is capped at the number of points.
-pub fn kmeans_cosine(embs: &[Vec<f32>], weights: &[f32], k: usize, first_seed: usize) -> Clustering {
+pub fn kmeans_cosine(
+    embs: &[Vec<f32>],
+    weights: &[f32],
+    k: usize,
+    first_seed: usize,
+) -> Clustering {
     let n = embs.len();
     let k = k.min(n).max(1);
     let dim = embs[0].len();
@@ -111,7 +124,10 @@ pub fn kmeans_cosine(embs: &[Vec<f32>], weights: &[f32], k: usize, first_seed: u
     while centroids.len() < k {
         let far = (0..n)
             .map(|i| {
-                let best = centroids.iter().map(|c| dot(&embs[i], c)).fold(f32::MIN, f32::max);
+                let best = centroids
+                    .iter()
+                    .map(|c| dot(&embs[i], c))
+                    .fold(f32::MIN, f32::max);
                 (i, 1.0 - best)
             })
             .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -125,7 +141,9 @@ pub fn kmeans_cosine(embs: &[Vec<f32>], weights: &[f32], k: usize, first_seed: u
         let mut changed = false;
         for i in 0..n {
             let best = (0..k)
-                .max_by(|&a, &b| dot(&embs[i], &centroids[a]).total_cmp(&dot(&embs[i], &centroids[b])))
+                .max_by(|&a, &b| {
+                    dot(&embs[i], &centroids[a]).total_cmp(&dot(&embs[i], &centroids[b]))
+                })
                 .unwrap_or(0);
             if labels[i] != best || iter == 0 {
                 changed |= labels[i] != best;
@@ -149,20 +167,31 @@ pub fn kmeans_cosine(embs: &[Vec<f32>], weights: &[f32], k: usize, first_seed: u
         }
     }
     let total_w: f32 = weights.iter().sum::<f32>().max(1e-9);
-    let score = (0..n).map(|i| weights[i] * dot(&embs[i], &centroids[labels[i]])).sum::<f32>() / total_w;
-    Clustering { labels, centroids, score }
+    let score = (0..n)
+        .map(|i| weights[i] * dot(&embs[i], &centroids[labels[i]]))
+        .sum::<f32>()
+        / total_w;
+    Clustering {
+        labels,
+        centroids,
+        score,
+    }
 }
 
 /// Best of a few initialisations (heaviest point, point farthest from the mean, a middle point).
 pub fn cluster_k(embs: &[Vec<f32>], weights: &[f32], k: usize) -> Clustering {
     let n = embs.len();
-    let heaviest = (0..n).max_by(|&a, &b| weights[a].total_cmp(&weights[b])).unwrap_or(0);
+    let heaviest = (0..n)
+        .max_by(|&a, &b| weights[a].total_cmp(&weights[b]))
+        .unwrap_or(0);
     let mut mean = vec![0f32; embs[0].len()];
     for e in embs {
         mean.iter_mut().zip(e).for_each(|(m, x)| *m += x);
     }
     normalize(&mut mean);
-    let farthest_from_mean = (0..n).min_by(|&a, &b| dot(&embs[a], &mean).total_cmp(&dot(&embs[b], &mean))).unwrap_or(0);
+    let farthest_from_mean = (0..n)
+        .min_by(|&a, &b| dot(&embs[a], &mean).total_cmp(&dot(&embs[b], &mean)))
+        .unwrap_or(0);
     [heaviest, farthest_from_mean, n / 2]
         .into_iter()
         .map(|seed| kmeans_cosine(embs, weights, k, seed))
@@ -185,7 +214,12 @@ pub struct Agglo {
 ///
 /// Clusters are merged while the most similar pair has similarity >= `stop_sim`, and also while there are
 /// more than `max_clusters` clusters (a hard cap on the number of speakers). `embs` must be normalised.
-pub fn agglomerative(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_clusters: usize) -> Agglo {
+pub fn agglomerative(
+    embs: &[Vec<f32>],
+    weights: &[f32],
+    stop_sim: f32,
+    max_clusters: usize,
+) -> Agglo {
     let n = embs.len();
     let mut sim = vec![0f32; n * n];
     for i in 0..n {
@@ -258,11 +292,20 @@ pub fn agglomerative(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_clus
             next += 1;
         }
     }
-    Agglo { labels, n_clusters: next, merge_sims }
+    Agglo {
+        labels,
+        n_clusters: next,
+        merge_sims,
+    }
 }
 
 /// Weighted, normalised centroid of every cluster.
-pub fn centroids_of(embs: &[Vec<f32>], weights: &[f32], labels: &[usize], k: usize) -> Vec<Vec<f32>> {
+pub fn centroids_of(
+    embs: &[Vec<f32>],
+    weights: &[f32],
+    labels: &[usize],
+    k: usize,
+) -> Vec<Vec<f32>> {
     let dim = embs.first().map_or(0, |e| e.len());
     let mut sums = vec![vec![0f32; dim]; k];
     for (i, e) in embs.iter().enumerate() {
@@ -277,7 +320,9 @@ pub fn centroids_of(embs: &[Vec<f32>], weights: &[f32], labels: &[usize], k: usi
 }
 
 fn nearest_centroid(e: &[f32], centroids: &[Vec<f32>]) -> usize {
-    (0..centroids.len()).max_by(|&a, &b| dot(e, &centroids[a]).total_cmp(&dot(e, &centroids[b]))).unwrap_or(0)
+    (0..centroids.len())
+        .max_by(|&a, &b| dot(e, &centroids[a]).total_cmp(&dot(e, &centroids[b])))
+        .unwrap_or(0)
 }
 
 /// A small cluster (under this share of all speech) counts as a variant of another speaker when ...
@@ -289,14 +334,23 @@ pub const VARIANT_SIM: f32 = 0.4;
 /// rounds of "move every point to its nearest centroid", then tiny clusters (less than `min_speech`
 /// seconds of speech in total - noise, laughter, a cough) are merged into the closest real speaker so they
 /// cannot become phantom speakers. Never returns more than `max_speakers` clusters. Labels are 0..k.
-pub fn cluster_auto(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_speakers: usize, min_speech: f32) -> Clustering {
+pub fn cluster_auto(
+    embs: &[Vec<f32>],
+    weights: &[f32],
+    stop_sim: f32,
+    max_speakers: usize,
+    min_speech: f32,
+) -> Clustering {
     let agg = agglomerative(embs, weights, stop_sim, max_speakers.max(1));
     let mut labels = agg.labels;
     let mut k = agg.n_clusters;
 
     let mut centroids = centroids_of(embs, weights, &labels, k);
     for _ in 0..5 {
-        let new: Vec<usize> = embs.iter().map(|e| nearest_centroid(e, &centroids)).collect();
+        let new: Vec<usize> = embs
+            .iter()
+            .map(|e| nearest_centroid(e, &centroids))
+            .collect();
         if new == labels {
             break;
         }
@@ -315,7 +369,9 @@ pub fn cluster_auto(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_speak
     //     clusters only - not into each other - stops many tiny clusters adding up to a phantom speaker.
     let mut keep: Vec<bool> = total.iter().map(|&t| t >= min_speech).collect();
     if !keep.iter().any(|&b| b) {
-        let heaviest = (0..k).max_by(|&a, &b| total[a].total_cmp(&total[b])).unwrap_or(0);
+        let heaviest = (0..k)
+            .max_by(|&a, &b| total[a].total_cmp(&total[b]))
+            .unwrap_or(0);
         keep[heaviest] = true;
     }
     // (2) a small established cluster (under VARIANT_SHARE of all speech) that sounds like another established
@@ -329,7 +385,9 @@ pub fn cluster_auto(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_speak
             }
             let host = (0..k)
                 .filter(|&o| o != c && keep[o] && dot(&centroids[c], &centroids[o]) >= VARIANT_SIM)
-                .max_by(|&a, &b| dot(&centroids[c], &centroids[a]).total_cmp(&dot(&centroids[c], &centroids[b])));
+                .max_by(|&a, &b| {
+                    dot(&centroids[c], &centroids[a]).total_cmp(&dot(&centroids[c], &centroids[b]))
+                });
             if let Some(h) = host {
                 weakest = Some((c, h));
                 weakest_total = total[c];
@@ -353,7 +411,10 @@ pub fn cluster_auto(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_speak
             } else {
                 (0..k)
                     .filter(|&o| keep[o])
-                    .max_by(|&a, &b| dot(&centroids[c], &centroids[a]).total_cmp(&dot(&centroids[c], &centroids[b])))
+                    .max_by(|&a, &b| {
+                        dot(&centroids[c], &centroids[a])
+                            .total_cmp(&dot(&centroids[c], &centroids[b]))
+                    })
                     .expect("at least one established speaker")
             }
         })
@@ -373,8 +434,15 @@ pub fn cluster_auto(embs: &[Vec<f32>], weights: &[f32], stop_sim: f32, max_speak
     centroids = centroids_of(embs, weights, &labels, k);
 
     let total_w: f32 = weights.iter().sum::<f32>().max(1e-9);
-    let score = (0..embs.len()).map(|i| weights[i] * dot(&embs[i], &centroids[labels[i]])).sum::<f32>() / total_w;
-    Clustering { labels, centroids, score }
+    let score = (0..embs.len())
+        .map(|i| weights[i] * dot(&embs[i], &centroids[labels[i]]))
+        .sum::<f32>()
+        / total_w;
+    Clustering {
+        labels,
+        centroids,
+        score,
+    }
 }
 
 // ---------------------------------------------------------------------------------- turns
@@ -387,7 +455,11 @@ pub fn merge_frames(frames: &[(f64, f64, usize)], max_gap: f64, min_len: f64) ->
     for &(s, e, spk) in frames {
         match turns.last_mut() {
             Some(t) if t.speaker == spk && s - t.end <= max_gap => t.end = t.end.max(e),
-            _ => turns.push(DiarTurn { start: s, end: e, speaker: spk }),
+            _ => turns.push(DiarTurn {
+                start: s,
+                end: e,
+                speaker: spk,
+            }),
         }
     }
     turns.retain(|t| t.end - t.start >= min_len);
@@ -395,7 +467,9 @@ pub fn merge_frames(frames: &[(f64, f64, usize)], max_gap: f64, min_len: f64) ->
     let mut merged: Vec<DiarTurn> = Vec::new();
     for t in turns {
         match merged.last_mut() {
-            Some(m) if m.speaker == t.speaker && t.start - m.end <= max_gap => m.end = m.end.max(t.end),
+            Some(m) if m.speaker == t.speaker && t.start - m.end <= max_gap => {
+                m.end = m.end.max(t.end)
+            }
             _ => merged.push(t),
         }
     }
@@ -440,7 +514,11 @@ mod tests {
 
     #[test]
     fn clean_ranges_join_adjacent_frames_and_skip_overlap() {
-        let w = WindowSeg { start: 0, classes: vec![1, 1, 4, 1, 0, 2], single_logp: vec![[0.0; 3]; 6] };
+        let w = WindowSeg {
+            start: 0,
+            classes: vec![1, 1, 4, 1, 0, 2],
+            single_logp: vec![[0.0; 3]; 6],
+        };
         let r = w.clean_ranges(0);
         assert_eq!(r.len(), 2); // frames 0-1, then frame 3 (frame 2 is an overlap)
         assert_eq!(r[0].1 - r[0].0, 2 * FRAME_STEP);
@@ -450,7 +528,14 @@ mod tests {
 
     #[test]
     fn kmeans_separates_two_directions() {
-        let embs: Vec<Vec<f32>> = vec![unit(1.0, 0.05), unit(1.0, -0.1), unit(0.9, 0.0), unit(0.05, 1.0), unit(-0.1, 1.0), unit(0.0, 0.9)];
+        let embs: Vec<Vec<f32>> = vec![
+            unit(1.0, 0.05),
+            unit(1.0, -0.1),
+            unit(0.9, 0.0),
+            unit(0.05, 1.0),
+            unit(-0.1, 1.0),
+            unit(0.0, 0.9),
+        ];
         let w = vec![1.0; 6];
         let c = cluster_k(&embs, &w, 2);
         assert_eq!(c.labels[0], c.labels[1]);
@@ -460,7 +545,14 @@ mod tests {
     }
 
     fn blob(centre: (f32, f32), count: usize) -> Vec<Vec<f32>> {
-        (0..count).map(|i| unit(centre.0 + (i as f32 % 5.0) * 0.01, centre.1 + (i as f32 % 3.0) * 0.01)).collect()
+        (0..count)
+            .map(|i| {
+                unit(
+                    centre.0 + (i as f32 % 5.0) * 0.01,
+                    centre.1 + (i as f32 % 3.0) * 0.01,
+                )
+            })
+            .collect()
     }
 
     fn third_axis(count: usize) -> Vec<Vec<f32>> {
@@ -476,15 +568,26 @@ mod tests {
     #[test]
     fn auto_finds_one_two_three_speakers() {
         let one = blob((1.0, 0.0), 12);
-        assert_eq!(cluster_auto(&one, &vec![3.0; 12], 0.5, 8, 10.0).centroids.len(), 1);
+        assert_eq!(
+            cluster_auto(&one, &[3.0; 12], 0.5, 8, 10.0).centroids.len(),
+            1
+        );
 
         let mut two = blob((1.0, 0.0), 8);
         two.extend(blob((0.0, 1.0), 8));
-        assert_eq!(cluster_auto(&two, &vec![3.0; 16], 0.5, 8, 10.0).centroids.len(), 2);
+        assert_eq!(
+            cluster_auto(&two, &[3.0; 16], 0.5, 8, 10.0).centroids.len(),
+            2
+        );
 
         let mut three = two.clone();
         three.extend(third_axis(8));
-        assert_eq!(cluster_auto(&three, &vec![3.0; 24], 0.5, 8, 10.0).centroids.len(), 3);
+        assert_eq!(
+            cluster_auto(&three, &[3.0; 24], 0.5, 8, 10.0)
+                .centroids
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -503,7 +606,12 @@ mod tests {
         let mut three = blob((1.0, 0.0), 8);
         three.extend(blob((0.0, 1.0), 8));
         three.extend(third_axis(8));
-        assert_eq!(cluster_auto(&three, &vec![3.0; 24], 0.5, 2, 10.0).centroids.len(), 2);
+        assert_eq!(
+            cluster_auto(&three, &[3.0; 24], 0.5, 2, 10.0)
+                .centroids
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -553,7 +661,7 @@ mod tests {
     fn agglomerative_reports_merge_similarities() {
         let mut e = blob((1.0, 0.0), 4);
         e.extend(blob((0.0, 1.0), 4));
-        let a = agglomerative(&e, &vec![1.0; 8], 0.5, 8);
+        let a = agglomerative(&e, &[1.0; 8], 0.5, 8);
         assert_eq!(a.n_clusters, 2);
         assert_eq!(a.merge_sims.len(), 6);
         assert!(a.merge_sims.iter().all(|&s| s > 0.9));
@@ -561,7 +669,13 @@ mod tests {
 
     #[test]
     fn merge_bridges_small_gaps_and_drops_blips() {
-        let f = [(0.0, 1.0, 0), (1.2, 2.0, 0), (2.0, 2.05, 1), (2.05, 4.0, 0), (5.0, 6.0, 1)];
+        let f = [
+            (0.0, 1.0, 0),
+            (1.2, 2.0, 0),
+            (2.0, 2.05, 1),
+            (2.05, 4.0, 0),
+            (5.0, 6.0, 1),
+        ];
         let t = merge_frames(&f, 0.4, 0.1);
         assert_eq!(t.len(), 2);
         assert_eq!((t[0].start, t[0].end, t[0].speaker), (0.0, 4.0, 0));
@@ -578,11 +692,26 @@ mod tests {
     #[test]
     fn renumbering_follows_first_speaker() {
         let mut t = vec![
-            DiarTurn { start: 0.0, end: 1.0, speaker: 5 },
-            DiarTurn { start: 1.0, end: 2.0, speaker: 2 },
-            DiarTurn { start: 2.0, end: 3.0, speaker: 5 },
+            DiarTurn {
+                start: 0.0,
+                end: 1.0,
+                speaker: 5,
+            },
+            DiarTurn {
+                start: 1.0,
+                end: 2.0,
+                speaker: 2,
+            },
+            DiarTurn {
+                start: 2.0,
+                end: 3.0,
+                speaker: 5,
+            },
         ];
         renumber_by_first_appearance(&mut t);
-        assert_eq!(t.iter().map(|x| x.speaker).collect::<Vec<_>>(), vec![0, 1, 0]);
+        assert_eq!(
+            t.iter().map(|x| x.speaker).collect::<Vec<_>>(),
+            vec![0, 1, 0]
+        );
     }
 }

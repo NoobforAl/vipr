@@ -48,7 +48,10 @@ pub struct AsrResult {
 impl AsrResult {
     pub fn load(path: &Path) -> Result<AsrResult> {
         let text = std::fs::read_to_string(path).map_err(io_err(path))?;
-        serde_json::from_str(&text).map_err(|e| Error::Registry { path: path.display().to_string(), msg: e.to_string() })
+        serde_json::from_str(&text).map_err(|e| Error::Registry {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })
     }
 }
 
@@ -111,7 +114,8 @@ const MAX_GAP_IN_UTTERANCE: f64 = 2.0;
 const SOFT_MAX_WORDS: usize = 90;
 
 fn ends_sentence(s: &str) -> bool {
-    s.trim_end_matches(['"', '\'', ')', '\u{201d}']).ends_with(['.', '?', '!'])
+    s.trim_end_matches(['"', '\'', ')', '\u{201d}'])
+        .ends_with(['.', '?', '!'])
 }
 
 /// Speaker whose turn overlaps `[s, e]` most; the nearest turn when none overlaps. `turns` sorted by start.
@@ -135,7 +139,13 @@ fn speaker_for(turns: &[SpeakerTurn], s: f64, e: f64) -> usize {
     let before = turns[..first].last();
     let after = turns.get(first);
     match (before, after) {
-        (Some(b), Some(a)) => if mid - b.end <= a.start - mid { b.speaker } else { a.speaker },
+        (Some(b), Some(a)) => {
+            if mid - b.end <= a.start - mid {
+                b.speaker
+            } else {
+                a.speaker
+            }
+        }
         (Some(b), None) => b.speaker,
         (None, Some(a)) => a.speaker,
         (None, None) => 0,
@@ -170,7 +180,11 @@ fn smooth_speakers(words: &mut [(Word, usize)]) {
                         None => by_speaker.push((*sp, d)),
                     }
                 }
-                if let Some((winner, _)) = by_speaker.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)) {
+                if let Some((winner, _)) = by_speaker
+                    .iter()
+                    .copied()
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                {
                     for item in &mut words[s..=e] {
                         item.1 = winner;
                     }
@@ -188,7 +202,12 @@ impl Transcript {
 
     /// Merge Whisper words with speaker turns. `turns = None` (no diarization) puts everything on speaker 0.
     /// `names` are display names by speaker index; missing ones become "Speaker N".
-    pub fn build(source: &str, asr: &AsrResult, turns: Option<&[SpeakerTurn]>, names: &[String]) -> Transcript {
+    pub fn build(
+        source: &str,
+        asr: &AsrResult,
+        turns: Option<&[SpeakerTurn]>,
+        names: &[String],
+    ) -> Transcript {
         let mut turns: Vec<SpeakerTurn> = turns.map(|t| t.to_vec()).unwrap_or_default();
         turns.sort_by(|a, b| a.start.total_cmp(&b.start));
 
@@ -196,13 +215,35 @@ impl Transcript {
         let mut flat: Vec<(Word, usize)> = Vec::new();
         for seg in &asr.segments {
             if seg.words.is_empty() {
-                let sp = if turns.is_empty() { 0 } else { speaker_for(&turns, seg.start, seg.end) };
-                flat.push((Word { text: seg.text.trim().to_string(), start: seg.start, end: seg.end }, sp));
+                let sp = if turns.is_empty() {
+                    0
+                } else {
+                    speaker_for(&turns, seg.start, seg.end)
+                };
+                flat.push((
+                    Word {
+                        text: seg.text.trim().to_string(),
+                        start: seg.start,
+                        end: seg.end,
+                    },
+                    sp,
+                ));
                 continue;
             }
             for w in &seg.words {
-                let sp = if turns.is_empty() { 0 } else { speaker_for(&turns, w.start, w.end.max(w.start)) };
-                flat.push((Word { text: w.text.clone(), start: w.start, end: w.end }, sp));
+                let sp = if turns.is_empty() {
+                    0
+                } else {
+                    speaker_for(&turns, w.start, w.end.max(w.start))
+                };
+                flat.push((
+                    Word {
+                        text: w.text.clone(),
+                        start: w.start,
+                        end: w.end,
+                    },
+                    sp,
+                ));
             }
         }
 
@@ -215,7 +256,11 @@ impl Transcript {
             if cur.is_empty() {
                 return;
             }
-            let text = cur.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+            let text = cur
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
             out.push(Utterance {
                 id: out.len() + 1,
                 start: cur.first().map_or(0.0, |w| w.start),
@@ -245,11 +290,21 @@ impl Transcript {
         }
         flush(&mut cur, cur_speaker, &mut utterances);
 
-        let count = utterances.iter().map(|u| u.speaker + 1).max().unwrap_or(1).max(names.len()).max(1);
+        let count = utterances
+            .iter()
+            .map(|u| u.speaker + 1)
+            .max()
+            .unwrap_or(1)
+            .max(names.len())
+            .max(1);
         let speakers = (0..count)
             .map(|id| Speaker {
                 id,
-                name: names.get(id).filter(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| format!("Speaker {}", id + 1)),
+                name: names
+                    .get(id)
+                    .filter(|n| !n.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| format!("Speaker {}", id + 1)),
             })
             .collect();
 
@@ -266,7 +321,11 @@ impl Transcript {
     }
 
     pub fn speaker_name(&self, id: usize) -> String {
-        self.speakers.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| format!("Speaker {}", id + 1))
+        self.speakers
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("Speaker {}", id + 1))
     }
 
     /// Apply LLM results: `(utterance id, new text, new speaker)`. Unknown ids are ignored.
@@ -292,20 +351,31 @@ impl Transcript {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(io_err(dir))?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|e| Error::Registry { path: path.display().to_string(), msg: e.to_string() })?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| Error::Registry {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })?;
         std::fs::write(path, json).map_err(io_err(path))
     }
 
     pub fn load(path: &Path) -> Result<Transcript> {
         let text = std::fs::read_to_string(path).map_err(io_err(path))?;
-        serde_json::from_str(&text).map_err(|e| Error::Registry { path: path.display().to_string(), msg: e.to_string() })
+        serde_json::from_str(&text).map_err(|e| Error::Registry {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })
     }
 
     /// Plain text: `[HH:MM:SS] Name: text`, one line per utterance (same layout as the Python pipeline).
     pub fn to_txt(&self) -> String {
         let mut out = String::new();
         for u in &self.utterances {
-            out.push_str(&format!("[{}] {}: {}\n", clock(u.start), self.speaker_name(u.speaker), u.text));
+            out.push_str(&format!(
+                "[{}] {}: {}\n",
+                clock(u.start),
+                self.speaker_name(u.speaker),
+                u.text
+            ));
         }
         out
     }
@@ -332,17 +402,38 @@ mod tests {
                 end: words.last().unwrap().2,
                 text: words.iter().map(|w| w.0).collect::<Vec<_>>().join(" "),
                 no_speech_prob: 0.0,
-                words: words.iter().map(|&(t, s, e)| AsrWord { text: t.into(), start: s, end: e, prob: 1.0 }).collect(),
+                words: words
+                    .iter()
+                    .map(|&(t, s, e)| AsrWord {
+                        text: t.into(),
+                        start: s,
+                        end: e,
+                        prob: 1.0,
+                    })
+                    .collect(),
             }],
         }
     }
 
     #[test]
     fn splits_utterances_on_speaker_change() {
-        let a = asr(&[("hello", 0.0, 0.4), ("there.", 0.5, 0.9), ("hi", 1.2, 1.4), ("yes.", 1.5, 1.8)]);
+        let a = asr(&[
+            ("hello", 0.0, 0.4),
+            ("there.", 0.5, 0.9),
+            ("hi", 1.2, 1.4),
+            ("yes.", 1.5, 1.8),
+        ]);
         let turns = [
-            SpeakerTurn { start: 0.0, end: 1.0, speaker: 0 },
-            SpeakerTurn { start: 1.1, end: 2.0, speaker: 1 },
+            SpeakerTurn {
+                start: 0.0,
+                end: 1.0,
+                speaker: 0,
+            },
+            SpeakerTurn {
+                start: 1.1,
+                end: 2.0,
+                speaker: 1,
+            },
         ];
         let t = Transcript::build("a.mp4", &a, Some(&turns), &["Eric".into()]);
         assert_eq!(t.utterances.len(), 2);
@@ -350,27 +441,65 @@ mod tests {
         assert_eq!(t.utterances[1].speaker, 1);
         assert_eq!(t.speaker_name(0), "Eric");
         assert_eq!(t.speaker_name(1), "Speaker 2");
-        assert!(t.to_txt().starts_with("[00:00:00] Eric: hello there.\n[00:00:01] Speaker 2: hi yes.\n"));
+        assert!(
+            t.to_txt()
+                .starts_with("[00:00:00] Eric: hello there.\n[00:00:01] Speaker 2: hi yes.\n")
+        );
     }
 
     #[test]
     fn sentence_is_not_split_between_speakers() {
         // "Yeah, I" was heard just before the turn change; the sentence belongs to speaker 1
         let a = asr(&[
-            ("Give", 0.0, 0.3), ("me", 0.3, 0.5), ("a", 0.5, 0.6), ("second.", 0.6, 1.2),
-            ("Yeah,", 1.5, 1.8), ("I", 1.85, 1.95),
-            ("mean,", 2.0, 2.4), ("how", 2.4, 2.6), ("does", 2.6, 2.9), ("it", 2.9, 3.0), ("work?", 3.0, 3.6),
-            ("It", 3.9, 4.0), ("does.", 4.0, 4.4),
+            ("Give", 0.0, 0.3),
+            ("me", 0.3, 0.5),
+            ("a", 0.5, 0.6),
+            ("second.", 0.6, 1.2),
+            ("Yeah,", 1.5, 1.8),
+            ("I", 1.85, 1.95),
+            ("mean,", 2.0, 2.4),
+            ("how", 2.4, 2.6),
+            ("does", 2.6, 2.9),
+            ("it", 2.9, 3.0),
+            ("work?", 3.0, 3.6),
+            ("It", 3.9, 4.0),
+            ("does.", 4.0, 4.4),
         ]);
         let turns = [
-            SpeakerTurn { start: 0.0, end: 1.3, speaker: 0 },
-            SpeakerTurn { start: 1.3, end: 1.97, speaker: 1 },
-            SpeakerTurn { start: 1.97, end: 3.7, speaker: 0 },
-            SpeakerTurn { start: 3.7, end: 4.5, speaker: 1 },
+            SpeakerTurn {
+                start: 0.0,
+                end: 1.3,
+                speaker: 0,
+            },
+            SpeakerTurn {
+                start: 1.3,
+                end: 1.97,
+                speaker: 1,
+            },
+            SpeakerTurn {
+                start: 1.97,
+                end: 3.7,
+                speaker: 0,
+            },
+            SpeakerTurn {
+                start: 3.7,
+                end: 4.5,
+                speaker: 1,
+            },
         ];
         let t = Transcript::build("a.mp4", &a, Some(&turns), &[]);
-        let texts: Vec<(usize, &str)> = t.utterances.iter().map(|u| (u.speaker, u.text.as_str())).collect();
-        assert_eq!(texts, vec![(0, "Give me a second. Yeah, I mean, how does it work?"), (1, "It does.")]);
+        let texts: Vec<(usize, &str)> = t
+            .utterances
+            .iter()
+            .map(|u| (u.speaker, u.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                (0, "Give me a second. Yeah, I mean, how does it work?"),
+                (1, "It does.")
+            ]
+        );
     }
 
     #[test]
@@ -383,7 +512,18 @@ mod tests {
 
     #[test]
     fn word_in_a_gap_takes_the_nearest_turn() {
-        let turns = [SpeakerTurn { start: 0.0, end: 1.0, speaker: 0 }, SpeakerTurn { start: 3.0, end: 4.0, speaker: 1 }];
+        let turns = [
+            SpeakerTurn {
+                start: 0.0,
+                end: 1.0,
+                speaker: 0,
+            },
+            SpeakerTurn {
+                start: 3.0,
+                end: 4.0,
+                speaker: 1,
+            },
+        ];
         assert_eq!(speaker_for(&turns, 1.1, 1.3), 0);
         assert_eq!(speaker_for(&turns, 2.7, 2.9), 1);
         assert_eq!(speaker_for(&turns, 0.9, 1.4), 0); // overlap wins
@@ -393,7 +533,10 @@ mod tests {
     fn refined_text_and_round_trip() {
         let a = asr(&[("helo", 0.0, 0.4), ("world", 0.5, 0.9)]);
         let mut t = Transcript::build("a.mp4", &a, None, &[]);
-        t.apply_refined(&[(1, "Hello, world.".into(), None), (99, "ignored".into(), None)]);
+        t.apply_refined(&[
+            (1, "Hello, world.".into(), None),
+            (99, "ignored".into(), None),
+        ]);
         assert_eq!(t.utterances[0].raw_text, "helo world");
         assert_eq!(t.utterances[0].text, "Hello, world.");
         assert!(t.refined);
