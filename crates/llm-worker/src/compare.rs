@@ -10,6 +10,7 @@ use engine::project::{
     AiPick, AiStatus, CompareInRow, CompareInput, CompareOutRow, CompareOutput, CompareStats,
     VERSION,
 };
+use engine::sanitize::sanitize_untrusted;
 use engine::translate::{background, relevant_terms};
 
 use crate::batch::{self, BadReply};
@@ -17,6 +18,9 @@ use crate::refine::Chat;
 
 /// Rows per model call. Fewer than for translation, since each row holds two texts and a reason.
 const MAX_CHUNK_ROWS: usize = 8;
+/// A row this long, both sides together, is a broken file and not a subtitle. It fails without a
+/// model call, so the user decides it.
+const MAX_ROW_TOKENS: usize = 800;
 
 /// Judges every input row. `progress` receives `(done, total)`.
 ///
@@ -41,7 +45,15 @@ pub fn compare(
             Some(pick) => {
                 judged.insert(row.id, pick);
             }
-            None => pending.push(row),
+            None => {
+                let tokens = chat.count_tokens(&sanitize_untrusted(&row.a))
+                    + chat.count_tokens(&sanitize_untrusted(&row.b));
+                if tokens > MAX_ROW_TOKENS {
+                    judged.insert(row.id, failed());
+                } else {
+                    pending.push(row);
+                }
+            }
         }
     }
     let total = input.rows.len();
@@ -135,6 +147,7 @@ impl Driver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::FitContext;
     use anyhow::anyhow;
     use engine::project::AiChoice;
 
@@ -353,6 +366,51 @@ mod tests {
         compare(&mut chat, &job, &mut |_, _| {}).unwrap();
         assert!(chat.asked[0].1.contains("deploy"));
         assert!(!chat.asked[0].1.contains("Cloudflare"));
+    }
+
+    #[test]
+    fn an_oversized_row_fails_alone_without_a_model_call() {
+        let huge = "word ".repeat(MAX_ROW_TOKENS);
+        let other = "other ".repeat(MAX_ROW_TOKENS);
+        let mut chat = mock(|u| Ok(all_a(u)));
+        let out = run(
+            &mut chat,
+            vec![
+                row(1, &huge, &other),
+                row(3, "left text", "right text"),
+                row(5, &huge, &huge),
+            ],
+        );
+        assert_eq!(asked_ids(&chat.asked[0].1), [3], "only the normal row");
+        assert_eq!(chat.asked.len(), 1);
+        assert_eq!(out.rows[0].ai.status, AiStatus::Failed);
+        assert_eq!(out.rows[0].ai.choice, None);
+        assert_eq!(out.rows[1].ai.status, AiStatus::Picked);
+        assert_eq!(
+            out.rows[2].ai.status,
+            AiStatus::Identical,
+            "no model needed"
+        );
+        assert_eq!((out.stats.picked, out.stats.failed), (1, 1));
+    }
+
+    #[test]
+    fn rows_too_long_together_fail_per_row_instead_of_stopping_the_run() {
+        // each row passes MAX_ROW_TOKENS, but even one prompt and its reply can't fit this context
+        let side = "word ".repeat(MAX_ROW_TOKENS / 2 - 1);
+        let other = "other ".repeat(MAX_ROW_TOKENS / 2 - 1);
+        let job: Vec<CompareInRow> = (1..=8).map(|i| row(i, &side, &other)).collect();
+        let mut chat = FitContext::new(mock(|u| Ok(all_a(u))), 1024);
+        let out = compare(&mut chat, &input(job), &mut |_, _| {}).unwrap();
+        assert!(chat.chat.asked.is_empty());
+        assert_eq!(out.stats.failed, 8);
+
+        // and with room for a few at a time, the chunk splits until they fit
+        let job: Vec<CompareInRow> = (1..=8).map(|i| row(i, &side, &other)).collect();
+        let mut chat = FitContext::new(mock(|u| Ok(all_a(u))), 8192);
+        let out = compare(&mut chat, &input(job), &mut |_, _| {}).unwrap();
+        assert_eq!(out.stats.picked, 8);
+        assert!(chat.chat.asked.iter().all(|(_, u)| asked_ids(u).len() < 8));
     }
 
     #[test]

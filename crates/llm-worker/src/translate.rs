@@ -19,9 +19,11 @@ use crate::batch::{self, BadReply};
 use crate::checkpoint::Checkpoint;
 use crate::refine::Chat;
 
-/// A cue this long is a broken file, not a subtitle. It stays untranslated, because a prompt that
-/// can't fit the context fails every retry and would end the run as hard errors.
+/// A cue this long is a broken file, not a subtitle. It stays untranslated without a model call.
 const MAX_CUE_TOKENS: usize = 600;
+/// A longer line is left out of the context, so one bad cue can't crowd out or fail its neighbours.
+/// With 3 pairs before and 2 lines after, context stays under 960 tokens.
+const MAX_CONTEXT_LINE_TOKENS: usize = 120;
 
 /// Translates every cue, resuming from `checkpoint` if it exists. The checkpoint stays on disk: the
 /// caller deletes it with [`Checkpoint::finish`] once the output is saved, so a failed save can't
@@ -73,9 +75,9 @@ pub fn translate(
                     ..result(cue, CueStatus::Translated)
                 })
             }
+            None if chat.count_tokens(&clean) > MAX_CUE_TOKENS => Some(untranslated(cue)),
             // Numbers, music notes and the like read the same in every language.
             None if !guards::has_letters(&clean) => Some(result(cue, CueStatus::Translated)),
-            None if chat.count_tokens(&clean) > MAX_CUE_TOKENS => Some(untranslated(cue)),
             None => {
                 pending.push(cue);
                 None
@@ -174,16 +176,19 @@ impl Driver<'_> {
             return Ok(Vec::new());
         };
         let (first, last) = (self.positions[&first.id], self.positions[&last.id]);
+        let chat = &*self.chat;
+        let fits = |text: &str| chat.count_tokens(text) <= MAX_CONTEXT_LINE_TOKENS;
         let before: Vec<(String, String)> = self.results
             [first.saturating_sub(CONTEXT_BEFORE)..first]
             .iter()
             .flatten()
-            .filter(|c| c.status == CueStatus::Translated)
+            .filter(|c| c.status == CueStatus::Translated && fits(&c.source) && fits(&c.text))
             .map(|c| (c.source.clone(), c.text.clone()))
             .collect();
         let after: Vec<String> = self.input.cues[last + 1..]
             .iter()
             .take(CONTEXT_AFTER)
+            .filter(|c| fits(&c.text))
             .map(|c| c.text.clone())
             .collect();
 
@@ -259,6 +264,7 @@ impl Driver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::FitContext;
     use anyhow::anyhow;
     use engine::profiles::GlossaryTerm;
     use std::path::PathBuf;
@@ -606,6 +612,56 @@ mod tests {
         assert_eq!(out.cues[0].status, CueStatus::Untranslated);
         assert_eq!(out.cues[1].status, CueStatus::Translated);
         assert_eq!(chat.asked.len(), 1);
+    }
+
+    #[test]
+    fn an_oversized_cue_without_letters_still_hits_the_cap() {
+        let mut chat = mock(|u| Ok(good(u)));
+        let huge = "123 ".repeat(MAX_CUE_TOKENS + 1);
+        let out = run(&mut chat, vec![cue(1, &huge), cue(2, "spoken line bravo")]);
+        assert_eq!(out.cues[0].status, CueStatus::Untranslated);
+        assert_eq!(chat.asked.len(), 1);
+        assert!(!chat.asked[0].1.contains("123"));
+    }
+
+    #[test]
+    fn long_lines_stay_out_of_the_context_on_both_sides() {
+        // under the cue cap, so each is a valid cue, but too long to be context
+        let long_digits = "123 ".repeat(MAX_CONTEXT_LINE_TOKENS + 1);
+        let long_words = "word ".repeat(MAX_CONTEXT_LINE_TOKENS + 1);
+        let mut cues = vec![cue(1, &long_digits)]; // settled locally, so it counts as translated
+        cues.extend((2..=13).map(|i| cue(i, "spoken line alpha")));
+        cues.push(cue(14, &long_words));
+        let mut chat = mock(|u| Ok(good(u)));
+        run(&mut chat, cues);
+        let first = &chat.asked[0].1;
+        assert_eq!(asked_ids(first), (2..=13).collect::<Vec<u64>>());
+        assert!(!first.contains("123 123"), "before: {first}");
+        assert!(!first.contains("word word"), "after: {first}");
+        assert!(!first.contains("Lines that come next"), "{first}");
+    }
+
+    #[test]
+    fn cues_too_long_together_fail_per_cue_instead_of_stopping_the_run() {
+        // each one passes MAX_CUE_TOKENS, and only one at a time fits with room for its reply
+        const N_CTX: usize = 4096;
+        let long = "word ".repeat(MAX_CUE_TOKENS - 100);
+        let cues: Vec<TimedText> = (1..=12).map(|i| cue(i, &long)).collect();
+        let mut chat = FitContext::new(mock(|u| Ok(good(u))), N_CTX);
+        let out = translate(&mut chat, &input(cues), None, &mut |_, _| {}).unwrap();
+        assert_eq!(out.cues.len(), 12);
+        for (system, user, max) in &chat.chat.asked {
+            assert_eq!(asked_ids(user).len(), 1);
+            assert!(chat.count_tokens(system) + chat.count_tokens(user) + max <= N_CTX);
+        }
+    }
+
+    #[test]
+    fn the_backends_own_overflow_error_does_not_stop_the_run() {
+        let answer = |_: &str| Err(anyhow!("prompt of 5000 tokens does not fit the context"));
+        let mut chat = FitContext::new(mock(answer), 1_000_000);
+        let out = translate(&mut chat, &input(numbered(4)), None, &mut |_, _| {}).unwrap();
+        assert_eq!(out.stats.untranslated, 4);
     }
 
     #[test]

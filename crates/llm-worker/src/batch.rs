@@ -4,8 +4,12 @@ use std::fmt;
 
 use anyhow::Result;
 
+use crate::refine::Chat;
+
 /// Hard errors in a row that stop the run. The checkpoint allows resuming.
 pub const MAX_HARD_ERRORS: usize = 3;
+/// Room kept for what the chat template adds around the two messages.
+const TEMPLATE_TOKENS: usize = 64;
 
 /// The model answered, but the answer can't be used. `call` returns this for a failure worth a
 /// split or a retry; any other error is a hard error, such as a failed decode.
@@ -19,6 +23,48 @@ impl fmt::Display for BadReply {
 }
 
 impl std::error::Error for BadReply {}
+
+/// Makes a prompt that can't fit the model's context a [`BadReply`], not a hard error, so imported
+/// text that is too long fails its own chunk (which then splits) instead of stopping the run.
+pub struct FitContext<C> {
+    pub chat: C,
+    n_ctx: usize,
+}
+
+impl<C: Chat> FitContext<C> {
+    pub fn new(chat: C, n_ctx: usize) -> FitContext<C> {
+        FitContext { chat, n_ctx }
+    }
+}
+
+impl<C: Chat> Chat for FitContext<C> {
+    fn complete(&mut self, system: &str, user: &str, max_new_tokens: usize) -> Result<String> {
+        let prompt =
+            self.chat.count_tokens(system) + self.chat.count_tokens(user) + TEMPLATE_TOKENS;
+        if prompt + max_new_tokens > self.n_ctx {
+            let message = format!(
+                "a prompt of about {prompt} tokens and a reply of up to {max_new_tokens} don't fit \
+                 the context of {}",
+                self.n_ctx
+            );
+            return Err(BadReply(message).into());
+        }
+        // TEMPLATE_TOKENS is an estimate, so the backend's own check can still refuse the prompt.
+        self.chat
+            .complete(system, user, max_new_tokens)
+            .map_err(|e| {
+                if e.to_string().contains("does not fit") {
+                    BadReply(e.to_string()).into()
+                } else {
+                    e
+                }
+            })
+    }
+
+    fn count_tokens(&self, text: &str) -> usize {
+        self.chat.count_tokens(text)
+    }
+}
 
 /// Runs `call` on chunks of `items`. On failure a chunk is split in half, then a single item gets one
 /// stricter retry (`call`'s `bool` is `strict`), then `give_up` decides its result. Output stays in
@@ -138,6 +184,60 @@ mod tests {
 
     fn bad() -> anyhow::Error {
         BadReply("x".into()).into()
+    }
+
+    /// Counts words as tokens and answers with `reply`, remembering how many calls it got.
+    struct Fixed {
+        reply: fn() -> Result<String>,
+        calls: usize,
+    }
+
+    impl Chat for Fixed {
+        fn complete(&mut self, _system: &str, _user: &str, _max: usize) -> Result<String> {
+            self.calls += 1;
+            (self.reply)()
+        }
+        fn count_tokens(&self, text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+    }
+
+    #[test]
+    fn a_prompt_that_cannot_fit_is_a_bad_reply_without_a_model_call() {
+        let inner = Fixed {
+            reply: || Ok("fine".into()),
+            calls: 0,
+        };
+        let mut chat = FitContext::new(inner, TEMPLATE_TOKENS + 10);
+        assert_eq!(chat.complete("two words", "two words", 6).unwrap(), "fine");
+        let err = chat.complete("two words", "two words", 7).unwrap_err();
+        assert!(err.is::<BadReply>(), "{err}");
+        assert_eq!(chat.chat.calls, 1);
+    }
+
+    #[test]
+    fn only_the_backends_overflow_error_becomes_a_bad_reply() {
+        let overflow = Fixed {
+            reply: || {
+                Err(anyhow!(
+                    "prompt of 5000 tokens does not fit the context of 4096"
+                ))
+            },
+            calls: 0,
+        };
+        let err = FitContext::new(overflow, 4096)
+            .complete("s", "u", 1)
+            .unwrap_err();
+        assert!(err.is::<BadReply>(), "{err}");
+
+        let lost = Fixed {
+            reply: || Err(anyhow!("decoding: gpu lost")),
+            calls: 0,
+        };
+        let err = FitContext::new(lost, 4096)
+            .complete("s", "u", 1)
+            .unwrap_err();
+        assert!(!err.is::<BadReply>(), "{err}");
     }
 
     #[test]

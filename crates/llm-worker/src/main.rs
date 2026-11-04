@@ -35,6 +35,7 @@ use engine::profiles::GlossaryTerm;
 use engine::project::{CompareInput, CompareOutput, CompareStats, TranslateInput, VERSION};
 use engine::prompts;
 use engine::sanitize::sanitize_untrusted;
+use llm_worker::batch::FitContext;
 use llm_worker::checkpoint::Checkpoint;
 use llm_worker::compare::compare;
 use llm_worker::llama::{LlamaChat, init_backend, load_model};
@@ -196,7 +197,8 @@ fn run_translate(args: &Args) -> Result<()> {
     let t = Instant::now();
     let backend = init_backend()?;
     let model = load_model(&backend, &args.model, args.cpu)?;
-    let mut chat = LlamaChat::new(&backend, &model, args.ctx, args.threads, !args.kv_f16)?;
+    let chat = LlamaChat::new(&backend, &model, args.ctx, args.threads, !args.kv_f16)?;
+    let mut chat = FitContext::new(chat, args.ctx as usize);
     event(json!({"event": "model_loaded", "seconds": t.elapsed().as_secs_f64()}));
 
     let output = translate(
@@ -238,7 +240,8 @@ fn run_compare(args: &Args) -> Result<()> {
         let t = Instant::now();
         let backend = init_backend()?;
         let model = load_model(&backend, &args.model, args.cpu)?;
-        let mut chat = LlamaChat::new(&backend, &model, args.ctx, args.threads, !args.kv_f16)?;
+        let chat = LlamaChat::new(&backend, &model, args.ctx, args.threads, !args.kv_f16)?;
+        let mut chat = FitContext::new(chat, args.ctx as usize);
         event(json!({"event": "model_loaded", "seconds": t.elapsed().as_secs_f64()}));
         compare(&mut chat, &input, &mut percent_events())?
     };
