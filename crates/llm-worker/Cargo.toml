@@ -1,0 +1,29 @@
+[package]
+name = "llm-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "llm_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llm-worker"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+engine = { version = "0.1.0", path = "../engine" }
+# pinned: whisper-rs and llama-cpp-2 cannot share a binary (both bundle ggml), so this stays its own exe
+llama-cpp-2 = "=0.1.161"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[features]
+# pick exactly one GPU backend when building (none = CPU only)
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]

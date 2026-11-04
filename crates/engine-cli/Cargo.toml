@@ -1,0 +1,14 @@
+[package]
+name = "engine-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+engine = { version = "0.1.0", path = "../engine" }
+gpu-detect = { version = "0.1.0", path = "../gpu-detect" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

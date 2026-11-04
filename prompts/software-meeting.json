@@ -1,0 +1,13 @@
+{
+  "name": "Software / dev meeting",
+  "description": "Colleagues discussing software development, tools, deployments and bugs.",
+  "fix_prompt": "They are meetings between colleagues, usually about software development. Expect technical terms, product and tool names, acronyms (API, PR, CI, UTC) and project names; keep them in their usual spelling and capitalisation.",
+  "translate_prompt": "",
+  "suggested_glossary": [
+    "GitHub",
+    "pull request",
+    "API",
+    "deployment",
+    "Docker"
+  ]
+}

@@ -1,0 +1,16 @@
+[package]
+name = "ggml-link"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# own workspace: this spike must not affect the main one
+[workspace]
+
+[features]
+cuda = ["whisper-rs/cuda", "llama-cpp-2/cuda"]
+vulkan = ["whisper-rs/vulkan", "llama-cpp-2/vulkan"]
+
+[dependencies]
+whisper-rs = "0.15.1"
+llama-cpp-2 = "0.1.150"

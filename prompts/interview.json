@@ -1,0 +1,7 @@
+{
+  "name": "Interview",
+  "description": "One person asks questions, the other answers at length (job interview, research interview, press).",
+  "fix_prompt": "They are interviews: one person mostly asks questions and the other answers at length. Keep the interviewee's own wording; only fix clear ASR errors, names and numbers.",
+  "translate_prompt": "",
+  "suggested_glossary": []
+}

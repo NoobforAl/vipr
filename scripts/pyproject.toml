@@ -1,0 +1,31 @@
+[project]
+name = "meeting-transcriber"
+version = "0.1.0"
+description = "Extract audio from meeting recordings, detect speakers and write a conversation transcript (local, CUDA)."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "pyannote.audio>=4.0.0",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
+    "transformers>=4.57.0",
+    "accelerate>=1.0.0",
+    "bitsandbytes>=0.46.0",
+    "imageio-ffmpeg>=0.6.0",
+    "soundfile>=0.12.1",
+    "numpy",
+    "tqdm",
+]
+
+[tool.uv]
+package = false
+
+# CUDA 12.8 builds of PyTorch (works on RTX 30/40/50 series)
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

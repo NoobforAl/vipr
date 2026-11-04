@@ -1,0 +1,7 @@
+{
+  "name": "Client or sales call",
+  "description": "A call with a customer or prospect: products, prices, dates, next steps.",
+  "fix_prompt": "They are client or sales calls. Product names, company names, prices, dates and numbers matter, so only change them when the context makes the correct form certain. Keep what was said; never make it sound more formal than it was.",
+  "translate_prompt": "",
+  "suggested_glossary": []
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Podcast / conversation",
+  "description": "A relaxed, recorded conversation between two people.",
+  "fix_prompt": "They are relaxed podcast-style conversations. Keep informal wording, jokes and slang as spoken; only fix clear ASR errors and punctuation.",
+  "translate_prompt": "",
+  "suggested_glossary": []
+}

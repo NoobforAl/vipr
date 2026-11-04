@@ -1,0 +1,43 @@
+# Rust build output (workspace + spikes)
+target/
+**/target/
+
+# secrets and local settings
+.env
+models.user.json
+
+# private notes and word list, kept on disk only
+PLAN.md
+glossary.txt
+
+# Python env of the test bench
+scripts/.venv/
+
+# downloaded models and big working data
+audio/
+*.mp4
+
+# build tools downloaded by scripts/setup-build-tools.ps1
+tools/
+
+# ASR experiment outputs
+validation/asr_out/
+validation/diar_out/
+
+# build output and release packages
+target-*/
+dist/
+
+# real meeting content: recordings, transcripts, gold clips (private)
+transcripts/
+refined/
+*.wav
+*.m4a
+*.mkv
+validation/clips/
+validation/clips.json
+validation/export_test/
+
+# Python caches
+__pycache__/
+*.pyc

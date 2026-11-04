@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/gpu-detect", "crates/engine", "crates/engine-cli", "crates/app", "crates/asr-worker", "crates/diar-worker", "crates/llm-worker"]
+# asr-worker compiles whisper.cpp (minutes); build it explicitly: cargo build -p asr-worker --features cuda
+default-members = ["crates/gpu-detect", "crates/engine", "crates/engine-cli", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

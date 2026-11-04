@@ -1,0 +1,7 @@
+{
+  "name": "General conversation",
+  "description": "Any recording of two people talking. Use this when nothing else fits.",
+  "fix_prompt": "Use the context of the conversation to decide which similar-sounding word fits.",
+  "translate_prompt": "",
+  "suggested_glossary": []
+}

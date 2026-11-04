@@ -1,0 +1,7 @@
+{
+  "name": "Lecture / training",
+  "description": "One person explains a subject, the other occasionally asks questions.",
+  "fix_prompt": "They are a lecture or training session: one person explains a subject and the other occasionally asks questions. Expect subject-specific terminology; prefer the spelling of technical terms used elsewhere in the text and in the glossary.",
+  "translate_prompt": "",
+  "suggested_glossary": []
+}

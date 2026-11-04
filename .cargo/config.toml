@@ -1,0 +1,11 @@
+# Build settings for the whisper.cpp / llama.cpp engines (see PLAN.md, Phase 0 findings).
+# Paths are relative to the project root. Variables already set in the environment win, except LIBCLANG_PATH (forced: the shell may point at libclang 22).
+[env]
+# bindgen breaks with libclang 22 (empty structs). Run scripts/setup-build-tools.ps1 once to get libclang 18.
+LIBCLANG_PATH = { value = "tools/libclang18/clang/native", relative = true, force = true }
+# CUDA 13 headers need MSVC's conforming preprocessor (Windows). Remove / override on Linux.
+CMAKE_CUDA_FLAGS = "-Xcompiler=/Zc:preprocessor"
+# Dev machine = RTX 3050 (sm_86). Release builds override this with a list of architectures.
+CMAKE_CUDA_ARCHITECTURES = "86"
+# Do not tune ggml for this exact CPU (AVX512 would crash older CPUs). Honoured by llama.cpp; whisper.cpp: see PLAN.md.
+GGML_NATIVE = "OFF"

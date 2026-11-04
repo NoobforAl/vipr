@@ -1,0 +1,17 @@
+[package]
+name = "gpu-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nvml-wrapper = "0.13.0"
+pollster = "1.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+wgpu = { version = "30.0.1", default-features = false, features = ["vulkan", "dx12", "metal"] }
+
+[[bin]]
+name = "detect"
+path = "src/main.rs"

@@ -1,0 +1,7 @@
+{
+  "name": "Casual chat",
+  "description": "Friends or colleagues talking informally.",
+  "fix_prompt": "They are casual chats. Keep slang, contractions and informal phrasing exactly as spoken (\"gonna\", \"wanna\", \"yeah\"); only fix clear ASR errors and punctuation.",
+  "translate_prompt": "",
+  "suggested_glossary": []
+}
