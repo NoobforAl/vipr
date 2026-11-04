@@ -1,0 +1,17 @@
+[package]
+name = "rtl-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# own workspace: this spike must not affect the main one
+[workspace]
+
+[dependencies]
+# same version and features as crates/app/Cargo.toml
+iced = { version = "0.14.0", features = ["svg"] }
+# diagnostics only (--report): the same text stack iced draws with
+iced_graphics = "0.14.0"
+png = "0.18.1"
+# already in the app's tree through cosmic-text
+unicode-bidi = "0.3.18"
