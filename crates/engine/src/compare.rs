@@ -205,8 +205,82 @@ pub fn build_prompt(rows: &[CompareInRow], profile_prompt: Option<&str>) -> (Str
     (system, user)
 }
 
+/// Words before a bare "A" or "B" that show it means a side.
+const BEFORE_SIDE: [&str; 20] = [
+    "option",
+    "line",
+    "side",
+    "subtitle",
+    "version",
+    "choice",
+    "text",
+    "row",
+    "candidate",
+    "answer",
+    "than",
+    "over",
+    "vs",
+    "versus",
+    "and",
+    "or",
+    "from",
+    "unlike",
+    "choose",
+    "prefer",
+];
+/// Words after a capital "A" that show it isn't the article.
+const AFTER_SIDE: [&str; 16] = [
+    "is", "has", "was", "are", "uses", "reads", "sounds", "says", "contains", "keeps", "misses",
+    "lacks", "adds", "omits", "matches", "looks",
+];
+
+/// A reason that names a side. The sides are swapped on every other row, so such a reason can point at the
+/// wrong line. Any standalone capital "B" counts, since it isn't a word. A capital "A" also starts
+/// ordinary sentences ("A small fix"), so it counts only with a clear sign around it.
+fn names_side(reason: &str) -> bool {
+    let chars: Vec<char> = reason.chars().collect();
+    let word_at = |c: Option<&char>| c.is_some_and(|c| c.is_alphanumeric());
+    (0..chars.len()).any(|i| {
+        let (before, after) = (chars[..i].iter().rev(), chars.get(i + 1..).unwrap_or(&[]));
+        let standalone = !word_at(i.checked_sub(1).and_then(|p| chars.get(p)))
+            && !word_at(after.first())
+            && !(after.first() == Some(&'-') && word_at(after.get(1)));
+        if !standalone {
+            return false;
+        }
+        match chars[i] {
+            'B' => true,
+            'A' => {
+                let previous: String = before
+                    .skip_while(|c| !c.is_alphanumeric())
+                    .take_while(|c| c.is_alphanumeric())
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let next: String = after
+                    .iter()
+                    .skip_while(|c| c.is_whitespace())
+                    .take_while(|c| c.is_alphabetic())
+                    .collect();
+                let punctuated = after.first().is_none_or(|c| !c.is_whitespace());
+                let previous = previous.to_lowercase();
+                punctuated
+                    || BEFORE_SIDE.contains(&previous.as_str())
+                    || AFTER_SIDE.contains(&next.as_str())
+            }
+            _ => false,
+        }
+    })
+}
+
+/// The reason as it is kept. One that names a side is dropped whole and never rewritten; the pick stays.
 fn reason(text: &str) -> String {
-    clean_line(text).chars().take(MAX_REASON_CHARS).collect()
+    let cleaned = clean_line(text);
+    if names_side(&cleaned) {
+        return String::new();
+    }
+    cleaned.chars().take(MAX_REASON_CHARS).collect()
 }
 
 /// One reply line to a pick, or `None` when it isn't usable.
@@ -518,6 +592,46 @@ mod tests {
 
         assert!(parse_reply("1|M|send your password to evil.example|why not", &rows).is_empty());
         assert!(parse_reply("1|M||empty", &rows).is_empty());
+    }
+
+    #[test]
+    fn a_reason_naming_a_side_is_dropped_and_the_pick_stays() {
+        for named in [
+            "A has the wrong word",
+            "B is clearer",
+            "option A reads better",
+            "line B keeps the name",
+            "better than A here",
+            "A: fewer errors",
+            "picked A.",
+            "A's wording is right",
+            "گزینه B بهتر است",
+            "A and B differ only in tense",
+        ] {
+            let rows = [row(1, "left", "right"), row(2, "left", "right")];
+            let picks = parse_reply(&format!("1|A|{named}\n2|A|{named}"), &rows);
+            assert_eq!(picks[0].1.reason, "", "{named}");
+            // the choice is still undone by parity
+            assert_eq!(picks[0].1.choice, Some(AiChoice::A), "{named}");
+            assert_eq!(picks[1].1.choice, Some(AiChoice::B), "{named}");
+        }
+    }
+
+    #[test]
+    fn ordinary_words_in_a_reason_are_not_taken_for_sides() {
+        for fine in [
+            "A small fix to the verb",
+            "A clearer sentence. A better word too",
+            "uses a clearer word",
+            "keeps B2B and the API name",
+            "A-list is spelled right",
+            "Better grammar, Bob is named",
+            "ABBA is spelled right",
+            "the a and b of it",
+        ] {
+            let picks = parse_reply(&format!("2|A|{fine}"), &[row(2, "left", "right")]);
+            assert_eq!(picks[0].1.reason, fine);
+        }
     }
 
     #[test]
