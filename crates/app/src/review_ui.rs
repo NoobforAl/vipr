@@ -253,13 +253,33 @@ impl Table {
 
 // ------------------------------------------------------------------------- save output
 
+/// The least time a saved cue is on screen.
+const MIN_CUE_SECONDS: f64 = 0.1;
+
 /// What a save writes.
 #[derive(Debug, Clone, PartialEq)]
 struct Reviewed {
-    /// In time order.
+    /// In time order, with no overlap.
     cues: Vec<Cue>,
     /// Rows whose text is empty, which is how a line is removed on purpose.
     dropped: usize,
+}
+
+/// Puts cues sorted by start in a row with no overlap. An end moves back to the next start. A cue that
+/// would then have no time on screen gets [`MIN_CUE_SECONDS`], and the next start moves forward to make
+/// room, so no text is lost and every cue can be seen. A long row with a short one inside it ends where
+/// the short one starts.
+fn remove_overlaps(cues: &mut [Cue]) {
+    for i in 0..cues.len() {
+        if let Some(next) = cues.get(i + 1).map(|c| c.start) {
+            cues[i].end = cues[i].end.min(next);
+        }
+        cues[i].end = cues[i].end.max(cues[i].start + MIN_CUE_SECONDS);
+        let end = cues[i].end;
+        if let Some(next) = cues.get_mut(i + 1) {
+            next.start = next.start.max(end);
+        }
+    }
 }
 
 /// The saved text of every row, or the ids of rows that have no pick yet. Nothing is guessed: a row
@@ -292,6 +312,7 @@ fn reviewed_output(rows: &[CompareRow]) -> Result<Reviewed, Vec<u64>> {
         });
     }
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
+    remove_overlaps(&mut cues);
     Ok(Reviewed { cues, dropped })
 }
 
@@ -1323,7 +1344,82 @@ mod tests {
         let out = reviewed_output(&[late, early]).unwrap();
         assert_eq!(out.cues[0].text, "early\nline");
         assert_eq!(out.cues[1].text, "late");
-        assert_eq!(out.cues[1].end, 9.0);
+        assert!((out.cues[1].end - (9.0 + MIN_CUE_SECONDS)).abs() < 1e-9);
+    }
+
+    fn timed_row(id: u64, start: f64, end: f64, text: &str) -> CompareRow {
+        let mut r = row(id, Some(text), None, ai(AiChoice::A));
+        r.start = start;
+        r.end = end;
+        r
+    }
+
+    fn assert_in_order(cues: &[Cue]) {
+        for c in cues {
+            assert!(c.end >= c.start + MIN_CUE_SECONDS - 1e-9, "{cues:?}");
+        }
+        for pair in cues.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "{cues:?}");
+        }
+    }
+
+    #[test]
+    fn saved_cues_never_overlap_and_lose_no_text() {
+        // the real meeting: the union of both sides' times
+        let out = reviewed_output(&[
+            timed_row(1, 0.14, 4.40, "a"),
+            timed_row(2, 3.67, 8.90, "b"),
+            timed_row(3, 9.5, 10.0, "c"),
+        ])
+        .unwrap();
+        assert_in_order(&out.cues);
+        assert_eq!((out.cues[0].start, out.cues[0].end), (0.14, 3.67));
+        assert_eq!((out.cues[1].start, out.cues[1].end), (3.67, 8.90));
+        assert_eq!(
+            (out.cues[2].start, out.cues[2].end),
+            (9.5, 10.0),
+            "left alone"
+        );
+
+        // one row inside another
+        let out = reviewed_output(&[
+            timed_row(1, 0.0, 10.0, "outer"),
+            timed_row(2, 2.0, 3.0, "inner"),
+            timed_row(3, 4.0, 5.0, "also inside"),
+        ])
+        .unwrap();
+        assert_in_order(&out.cues);
+        assert_eq!((out.cues[0].start, out.cues[0].end), (0.0, 2.0));
+        assert_eq!((out.cues[1].start, out.cues[1].end), (2.0, 3.0));
+
+        // the same start, a run of them, and a row with no length
+        let out = reviewed_output(&[
+            timed_row(1, 1.0, 5.0, "a"),
+            timed_row(2, 1.0, 3.0, "b"),
+            timed_row(3, 1.0, 1.0, "c"),
+            timed_row(4, 1.05, 2.0, "d"),
+            timed_row(5, 7.0, 6.0, "e"),
+        ])
+        .unwrap();
+        assert_in_order(&out.cues);
+        let texts: Vec<&str> = out.cues.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["a", "b", "c", "d", "e"]);
+        assert_eq!(out.dropped, 0);
+    }
+
+    #[test]
+    fn saved_cues_survive_the_millisecond_rounding_of_the_files() {
+        let out = reviewed_output(&[
+            timed_row(1, 1.0, 1.0, "a"),
+            timed_row(2, 1.0004, 1.0004, "b"),
+        ])
+        .unwrap();
+        let srt = subtitles::to_srt(&out.cues);
+        assert!(
+            srt.contains("00:00:01,000 --> 00:00:01,100")
+                && srt.contains("00:00:01,100 --> 00:00:01,200"),
+            "{srt}"
+        );
     }
 
     #[test]
