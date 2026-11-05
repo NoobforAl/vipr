@@ -12,11 +12,12 @@ use std::sync::OnceLock;
 use audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::audio::sample::Sample;
+use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, Track};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
@@ -40,6 +41,16 @@ fn audio_err(path: &Path, what: impl std::fmt::Display) -> Error {
     Error::Audio(format!("{}: {what}", path.display()))
 }
 
+/// The one audio track ViPr uses: the file's first, whatever its flags say. Speech recognition and the
+/// player must hear the same track, and ffmpeg's `-map 0:a:0` counts the same way. A first track whose
+/// codec the built-in decoders lack fails here and goes on to ffmpeg, so a later track is never used instead.
+fn first_audio_track(format: &dyn FormatReader) -> Option<&Track> {
+    format
+        .tracks()
+        .iter()
+        .find(|t| matches!(t.codec_params, Some(CodecParameters::Audio(_))))
+}
+
 /// Decode the first audio track to mono samples at the file's own sample rate. Returns `(samples, rate)`.
 pub fn decode_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
     let file = File::open(path).map_err(io_err(path))?;
@@ -59,9 +70,8 @@ pub fn decode_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
         )
         .map_err(|e| audio_err(path, format!("unsupported or damaged file ({e})")))?;
 
-    let track = format
-        .default_track(TrackType::Audio)
-        .ok_or_else(|| audio_err(path, "no audio track"))?;
+    let track =
+        first_audio_track(format.as_ref()).ok_or_else(|| audio_err(path, "no audio track"))?;
     let track_id = track.id;
     let known_delay = track.delay;
     let params = track
@@ -288,7 +298,8 @@ fn decode_with_ffmpeg(ffmpeg: &Path, path: &Path) -> Result<Vec<f32>> {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
-        .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1"])
+        .args(["-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000"])
+        .args(["-f", "f32le", "pipe:1"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -379,7 +390,7 @@ fn native_can_read(path: &Path) -> bool {
     ) else {
         return false;
     };
-    let Some(track) = format.default_track(TrackType::Audio) else {
+    let Some(track) = first_audio_track(format.as_ref()) else {
         return false;
     };
     let track_id = track.id;
@@ -411,7 +422,7 @@ fn ffmpeg_can_read(ffmpeg: &Path, path: &Path) -> bool {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
-        .args(["-vn", "-t", "1", "-f", "null", "-"])
+        .args(["-map", "0:a:0", "-vn", "-t", "1", "-f", "null", "-"])
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(windows)]
