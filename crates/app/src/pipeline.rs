@@ -382,8 +382,6 @@ fn with_background(description: &str, prompt: &str) -> String {
 /// Makes a job use the active profile: its glossary terms go into `<stem>.glossary.txt` and through
 /// `--glossary`, and its prompt becomes background for the cleanup. Call just before [`run`]. On an
 /// error the job is left as it was and can still run; tell the user.
-// temporary: `main.rs` calls this after integration
-#[allow(dead_code)]
 pub fn apply_profile(input: &mut JobInput, profile: &Profile) -> Result<(), String> {
     if !profile.glossary.is_empty() {
         let paths = result_paths(&input.path, &input.out_dir);

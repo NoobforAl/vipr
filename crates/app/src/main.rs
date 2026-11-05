@@ -15,12 +15,13 @@ mod profiles_ui;
 mod review_ui;
 mod theme;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use engine::download::{ModelStore, Status};
+use engine::lang::{LANGUAGES, clean_separators};
 use engine::project::ProjectPaths;
 use engine::registry::{Fit, ModelEntry, Preset, Registry, Role, fit};
 use engine::settings::Settings;
@@ -33,7 +34,8 @@ use iced::widget::{
     row, scrollable, space, stack, svg, text, text_editor, text_input, toggler,
 };
 use iced::{
-    Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, window,
+    Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, keyboard,
+    window,
 };
 use out::{JobRef, Out, Page};
 use theme::{DARK, LIGHT, Tokens};
@@ -87,7 +89,29 @@ fn has_media_extension(path: &std::path::Path) -> bool {
 
 const PAGE: usize = 150; // transcript rows drawn at once
 
+/// A build without a console would lose a panic's message, so it also goes to `panic.log` in the
+/// config folder.
+fn log_panics() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = dirs::config_dir().map(|d| d.join(engine::APP_DIR_NAME)) {
+            let _ = std::fs::create_dir_all(&dir);
+            let log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"));
+            if let Ok(mut log) = log {
+                use std::io::Write;
+                let trace = std::backtrace::Backtrace::force_capture();
+                let _ = writeln!(log, "{info}\n{trace}\n");
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 fn main() -> iced::Result {
+    log_panics();
     iced::application(App::new, App::update, App::view)
         .title(|_: &App| format!("{APP_NAME} {VERSION}"))
         .theme(|app: &App| app.tokens.theme())
@@ -222,7 +246,63 @@ struct Job {
     /// Where the results are, with the real stem. Set when the job finishes.
     paths: Option<ProjectPaths>,
     error: Option<String>,
+    /// Opened from saved results and its media is not where it was.
+    media_missing: bool,
 }
+
+impl Job {
+    fn new(id: u64, path: PathBuf, size: u64) -> Job {
+        Job {
+            id,
+            path,
+            size,
+            state: JobState::Waiting,
+            steps: Vec::new(),
+            step: 0,
+            detail: String::new(),
+            step_progress: 0.0,
+            progress: 0.0,
+            started: None,
+            cancelled: false,
+            notes: Vec::new(),
+            expanded: false,
+            about: pipeline::About {
+                category: "default".into(),
+                ..Default::default()
+            },
+            names_text: String::new(),
+            transcript: None,
+            outputs: Vec::new(),
+            paths: None,
+            error: None,
+            media_missing: false,
+        }
+    }
+
+    /// The file name, safe to show. It comes from the disk, so it can hold anything.
+    fn name(&self) -> String {
+        file_name(&self.path)
+    }
+}
+
+/// A path's last part, cleaned for the text layout.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| clean_separators(&n.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// A message from a feature module, shown on every page.
+#[derive(Debug, Clone)]
+struct Notice {
+    text: String,
+    /// `None` stays until dismissed.
+    expires: Option<Instant>,
+}
+
+/// How long an `Out::Notice` stays up.
+const NOTICE_TIME: Duration = Duration::from_secs(15);
+const MAX_NOTICES: usize = 8;
 
 /// Progress of the one-click ffmpeg download.
 #[derive(Debug, Clone)]
@@ -237,6 +317,16 @@ struct FfmpegProgress {
     done: u64,
     total: u64,
     unpacking: bool,
+}
+
+/// An entry of the translate language picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LanguageChoice(&'static engine::lang::Language);
+
+impl fmt::Display for LanguageChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.0.name, self.0.code)
+    }
 }
 
 /// Which copy button was pressed last (it shows "Copied" for a moment).
@@ -266,8 +356,12 @@ enum Message {
     Cancel(u64),
     OpenSettings,
     CloseSettings,
+    /// Closes whichever dialog is open.
+    Escape,
     // queue
     AddFiles,
+    /// A file dropped on the window: for the import dialog while it is open, else for the queue.
+    FileDropped(PathBuf),
     /// Files from the picker, drag and drop (or MT_PRELOAD): they are checked before they are added.
     FilesPicked(Vec<PathBuf>),
     FilesChecked(Vec<(PathBuf, engine::audio::Probe)>),
@@ -282,6 +376,19 @@ enum Message {
     // transcript page
     OpenJob(u64),
     Back,
+    /// Go to a page, as a button asks for it.
+    Go(Page),
+    OpenImport(u64),
+    TranslateTarget(LanguageChoice),
+    Translate(u64),
+    // saved results
+    OpenResult {
+        folder: bool,
+    },
+    ResultPicked(Option<PathBuf>),
+    ResultLoaded(Result<jobs::LoadedResult, String>),
+    LocateMedia(u64),
+    MediaLocated(u64, Option<PathBuf>),
     MoreRows,
     OpenFolder(u64),
     CopyText(u64),
@@ -351,6 +458,16 @@ struct App {
     copied: Option<(CopyTarget, Instant)>,
     /// Files that were not added, with the reason; shown for a few seconds.
     notice: Option<(Vec<String>, Instant)>,
+    /// Messages from the feature modules.
+    notices: Vec<Notice>,
+    /// A compare that finished while the user was busy: it waits behind a button instead of taking over.
+    review_ready: Option<u64>,
+    /// Jobs known to have a compare file, for the Review button.
+    reviewable: HashSet<u64>,
+    /// The language picked for "Translate" on the result page.
+    translate_target: Option<LanguageChoice>,
+    /// True from pressing Start until the user goes anywhere else: the player may open by itself.
+    auto_open: bool,
     /// ffmpeg download in progress, or the last error
     ffmpeg_dl: Option<FfmpegProgress>,
     ffmpeg_err: Option<String>,
@@ -408,6 +525,11 @@ impl App {
             rows: Vec::new(),
             copied: None,
             notice: None,
+            notices: Vec::new(),
+            review_ready: None,
+            reviewable: HashSet::new(),
+            translate_target: None,
+            auto_open: false,
             ffmpeg_dl: None,
             ffmpeg_err: None,
             waiting_for_ffmpeg: Vec::new(),
@@ -502,6 +624,7 @@ impl App {
             || self.running.is_some()
             || self.copied.is_some()
             || self.notice.is_some()
+            || self.notices.iter().any(|n| n.expires.is_some())
             || self.ffmpeg_dl.is_some()
     }
 
@@ -576,12 +699,43 @@ impl App {
                 self.start_next()
             }
             Out::Notice(line) => {
-                let mut lines = self.notice.take().map(|(l, _)| l).unwrap_or_default();
-                lines.push(line);
-                lines.truncate(8);
-                self.notice = Some((lines, Instant::now()));
+                self.tell(&line, Some(Instant::now() + NOTICE_TIME));
                 Task::none()
             }
+            Out::Alert(line) => {
+                self.tell(&line, None);
+                Task::none()
+            }
+        }
+    }
+
+    /// All notice text passes here: errors can quote paths and file content.
+    fn tell(&mut self, line: &str, expires: Option<Instant>) {
+        if self.notices.len() == MAX_NOTICES {
+            self.notices.remove(0);
+        }
+        self.notices.push(Notice {
+            text: clean_separators(line),
+            expires,
+        });
+    }
+
+    /// True when a result that just finished may take over the window: the user is not playing,
+    /// reviewing, in a dialog, or looking at another recording.
+    fn can_take_over(&self, job: u64) -> bool {
+        !self.settings_open
+            && !import_ui::is_open(&self.import)
+            && (self.page == Page::Home || self.page == Page::Transcript(job))
+    }
+
+    /// `jobs::update`'s answer. A finished run opens its page only when that interrupts nothing.
+    fn handle_job_out(&mut self, out: Out) -> Task<Message> {
+        match out {
+            Out::Open(Page::Review(job)) if !self.can_take_over(job) => {
+                self.review_ready = Some(job);
+                Task::none()
+            }
+            out => self.handle_out(out),
         }
     }
 
@@ -595,8 +749,15 @@ impl App {
             },
             Page::Home | Page::Transcript(_) => None,
         };
+        if self.page != page {
+            self.auto_open = false;
+        }
+        if matches!(page, Page::Review(id) if self.review_ready == Some(id)) {
+            self.review_ready = None;
+        }
         if matches!(self.page, Page::Player(_)) && self.page != page {
             player::close(&mut self.player);
+            marks_ui::flush(&mut self.marks);
         }
         match (page, job) {
             (Page::Transcript(id), _) => self.update(Message::OpenJob(id)),
@@ -633,12 +794,15 @@ impl App {
             return Task::none();
         }
         let message = match self.page {
-            Page::Player(_) => player::key(&self.player, &key, mods)
-                .map(Message::Player)
-                .or_else(|| {
-                    let at = player::position(&self.player);
-                    marks_ui::key(&self.marks, &key, mods, at).map(Message::Marks)
-                }),
+            Page::Player(_) if player::is_playing(&self.player) => {
+                player::key(&self.player, &key, mods)
+                    .map(Message::Player)
+                    .or_else(|| {
+                        let at = player::position(&self.player);
+                        marks_ui::key(&self.marks, &key, mods, at).map(Message::Marks)
+                    })
+            }
+            Page::Player(_) => None,
             Page::Review(_) => review_ui::key(&self.review, &key, mods).map(Message::Review),
             Page::Home | Page::Transcript(_) => None,
         };
@@ -649,12 +813,41 @@ impl App {
     }
 
     /// The video and its controls, next to the marks.
-    fn player_page(&self) -> Element<'_, Message> {
+    fn player_page(&self, id: u64) -> Element<'_, Message> {
         let t = self.tokens;
         let marks = marks_ui::marks(&self.marks);
+        let name = self.job(id).map(Job::name).unwrap_or_default();
+        let mut top = row![
+            button(icons::icon(icons::ARROW_LEFT, 15.0, t.text))
+                .padding(6)
+                .style(theme::ghost(t))
+                .on_press(Message::Go(Page::Transcript(id))),
+            text(name).size(13).color(t.muted).width(Length::Fill),
+        ]
+        .spacing(8)
+        .padding([4, 8])
+        .align_y(Alignment::Center);
+        if self.reviewable.contains(&id) {
+            top = top.push(
+                button(text("Review").size(12))
+                    .padding([4, 10])
+                    .style(theme::ghost(t))
+                    .on_press(Message::Go(Page::Review(id))),
+            );
+        }
+        let mut video = column![
+            top,
+            player::view(&self.player, t, marks).map(Message::Player)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
+        if player::needs_ffmpeg(&self.player) {
+            video = video.push(container(self.ffmpeg_offer()).padding(12));
+        }
+        let at = player::is_playing(&self.player).then(|| player::position(&self.player));
         row![
-            player::view(&self.player, t, marks).map(Message::Player),
-            marks_ui::view(&self.marks, t).map(Message::Marks),
+            video,
+            marks_ui::view(&self.marks, t, at).map(Message::Marks)
         ]
         .into()
     }
@@ -717,7 +910,7 @@ impl App {
         job.error = None;
         job.expanded = false;
         let id = job.id;
-        let input = pipeline::JobInput {
+        let mut input = pipeline::JobInput {
             path: job.path.clone(),
             out_dir,
             about: job.about.clone(),
@@ -730,6 +923,14 @@ impl App {
         };
         self.running = Some(id);
         pipeline::reset_cancel();
+        if let Some(profile) = profiles_ui::active(&self.profiles, &self.settings)
+            && let Err(e) = pipeline::apply_profile(&mut input, &profile)
+        {
+            self.tell(
+                &format!("The active profile could not be used for this run: {e}"),
+                None,
+            );
+        }
         Task::run(job_stream(input), move |ev| Message::JobEvent(id, ev))
     }
 
@@ -803,6 +1004,8 @@ impl App {
                 {
                     self.notice = None;
                 }
+                let now = Instant::now();
+                self.notices.retain(|n| n.expires.is_none_or(|at| at > now));
                 Task::none()
             }
             Message::WinId(id) => {
@@ -848,9 +1051,14 @@ impl App {
                 // do not leave a worker running (and the GPU busy) after the window is gone
                 pipeline::request_cancel();
                 player::close(&mut self.player);
+                marks_ui::flush(&mut self.marks);
+                profiles_ui::flush(&mut self.profiles);
+                // an open row editor ends with a write, which has to finish before the window goes
+                let (write, _) = review_ui::update(&mut self.review, review_ui::Msg::Back);
+                let write = write.map(Message::Review);
                 match self.win {
-                    Some(id) => window::close(id),
-                    None => iced::exit(),
+                    Some(id) => write.chain(window::close(id)),
+                    None => write.chain(iced::exit()),
                 }
             }
             Message::Cancel(id) => {
@@ -868,15 +1076,33 @@ impl App {
             }
             Message::OpenSettings => {
                 self.settings_open = true;
+                self.auto_open = false;
                 self.ffmpeg = engine::audio::find_ffmpeg();
                 Task::none()
             }
             Message::CloseSettings => {
                 self.settings_open = false;
+                profiles_ui::flush(&mut self.profiles);
                 Task::none()
+            }
+            Message::Escape => {
+                if import_ui::is_open(&self.import) {
+                    self.update(Message::Import(import_ui::Msg::Close))
+                } else if self.settings_open {
+                    self.update(Message::CloseSettings)
+                } else {
+                    Task::none()
+                }
             }
 
             Message::AddFiles => Task::perform(pick_files(), Message::FilesPicked),
+            Message::FileDropped(path) => {
+                if import_ui::is_open(&self.import) {
+                    self.update(Message::Import(import_ui::Msg::FileDropped(path)))
+                } else {
+                    self.update(Message::FilesPicked(vec![path]))
+                }
+            }
             Message::FilesPicked(files) => {
                 // anything that is not a readable video / audio file is ignored (see FilesChecked)
                 let files: Vec<PathBuf> = files
@@ -891,10 +1117,10 @@ impl App {
             Message::FilesChecked(results) => {
                 let mut skipped: Vec<String> = Vec::new();
                 for (f, verdict) in results {
-                    let name = f
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| f.display().to_string());
+                    let name = match file_name(&f) {
+                        name if name.is_empty() => clean_separators(&f.display().to_string()),
+                        name => name,
+                    };
                     match verdict {
                         engine::audio::Probe::Ok => {
                             if self.jobs.iter().any(|j| j.path == f) {
@@ -903,30 +1129,7 @@ impl App {
                             let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
                             let id = self.next_id;
                             self.next_id += 1;
-                            self.jobs.push(Job {
-                                id,
-                                path: f,
-                                size,
-                                state: JobState::Waiting,
-                                steps: Vec::new(),
-                                step: 0,
-                                detail: String::new(),
-                                step_progress: 0.0,
-                                progress: 0.0,
-                                started: None,
-                                cancelled: false,
-                                notes: Vec::new(),
-                                expanded: false,
-                                about: pipeline::About {
-                                    category: "default".into(),
-                                    ..Default::default()
-                                },
-                                names_text: String::new(),
-                                transcript: None,
-                                outputs: Vec::new(),
-                                paths: None,
-                                error: None,
-                            });
+                            self.jobs.push(Job::new(id, f, size));
                         }
                         engine::audio::Probe::NeedsFfmpeg => {
                             skipped.push(format!("{name}: this format needs ffmpeg"));
@@ -935,7 +1138,7 @@ impl App {
                             }
                         }
                         engine::audio::Probe::Invalid(why) => {
-                            skipped.push(format!("{name}: {why}"))
+                            skipped.push(format!("{name}: {}", clean_separators(&why)))
                         }
                     }
                 }
@@ -953,6 +1156,8 @@ impl App {
             }
             Message::DismissNotice => {
                 self.notice = None;
+                self.notices.clear();
+                self.review_ready = None;
                 if self.ffmpeg_dl.is_none() {
                     self.waiting_for_ffmpeg.clear();
                     self.ffmpeg_err = None;
@@ -991,10 +1196,16 @@ impl App {
                     // add the files that were waiting for it
                     let files = std::mem::take(&mut self.waiting_for_ffmpeg);
                     self.notice = None;
-                    if files.is_empty() {
+                    let waiting = if files.is_empty() {
                         Task::none()
                     } else {
                         Task::done(Message::FilesPicked(files))
+                    };
+                    if player::needs_ffmpeg(&self.player) {
+                        let retry = self.update(Message::Player(player::Msg::Retry));
+                        Task::batch([waiting, retry])
+                    } else {
+                        waiting
                     }
                 }
                 FfmpegEvent::Finished(Err(e)) => {
@@ -1028,7 +1239,7 @@ impl App {
             }
             Message::Description(id, v) => {
                 if let Some(j) = self.job_mut(id) {
-                    j.about.description = v;
+                    j.about.description = clean_separators(&v);
                 }
                 Task::none()
             }
@@ -1040,7 +1251,7 @@ impl App {
             }
             Message::SpeakerNames(id, v) => {
                 if let Some(j) = self.job_mut(id) {
-                    j.names_text = v;
+                    j.names_text = clean_separators(&v);
                 }
                 Task::none()
             }
@@ -1051,6 +1262,7 @@ impl App {
                         j.state = JobState::Waiting;
                     }
                 }
+                self.auto_open = self.page == Page::Home && !self.settings_open;
                 self.start_next()
             }
             Message::JobEvent(id, ev) => {
@@ -1097,7 +1309,14 @@ impl App {
                             j.paths = Some(paths);
                         }
                         self.running = None;
-                        return self.start_next();
+                        let next = self.start_next();
+                        // only when nothing else is left to do and the user stayed where they were
+                        let idle = self.running.is_none() && !jobs::busy(&self.queue);
+                        if idle && self.auto_open && self.can_take_over(id) {
+                            let open = self.open_page(Page::Player(id));
+                            return Task::batch([next, open]);
+                        }
+                        return next;
                     }
                     pipeline::Event::Failed(e) => {
                         let mut was_cancelled = false;
@@ -1125,22 +1344,105 @@ impl App {
 
             Message::OpenJob(id) => {
                 if let Some(t) = self.job(id).and_then(|j| j.transcript.as_ref()) {
-                    let names: Vec<String> = t.speakers.iter().map(|s| s.name.clone()).collect();
+                    let names: Vec<String> = t
+                        .speakers
+                        .iter()
+                        .map(|s| clean_separators(&s.name))
+                        .collect();
                     let rows: Vec<text_editor::Content> = t
                         .utterances
                         .iter()
                         .take(PAGE)
-                        .map(|u| text_editor::Content::with_text(&u.text))
+                        .map(|u| text_editor::Content::with_text(&clean_separators(&u.text)))
                         .collect();
                     self.name_edits = names;
                     self.rows = rows;
                     self.copied = None;
                     self.shown = PAGE;
                     self.page = Page::Transcript(id);
+                    self.auto_open = false;
+                    self.note_review_files(id);
                 }
                 Task::none()
             }
-            Message::Back => self.open_page(Page::Home),
+            Message::Back => {
+                // leaving a review keeps a row still being edited
+                let write = if matches!(self.page, Page::Review(_)) {
+                    let (write, _) = review_ui::update(&mut self.review, review_ui::Msg::Back);
+                    write.map(Message::Review)
+                } else {
+                    Task::none()
+                };
+                Task::batch([write, self.open_page(Page::Home)])
+            }
+            Message::Go(page) => {
+                if let Page::Player(id) | Page::Review(id) = page {
+                    self.note_review_files(id);
+                }
+                self.open_page(page)
+            }
+            Message::OpenImport(id) => match self.job_ref(id) {
+                Some(job) => {
+                    self.auto_open = false;
+                    let (task, out) = import_ui::open(&mut self.import, &job);
+                    Task::batch([task.map(Message::Import), self.handle_out(out)])
+                }
+                None => Task::none(),
+            },
+            Message::TranslateTarget(choice) => {
+                self.translate_target = Some(choice);
+                Task::none()
+            }
+            Message::Translate(job) => {
+                let Some(target) = self.translate_target else {
+                    return Task::none();
+                };
+                self.handle_out(Out::Enqueue(out::JobKind::Translate {
+                    job,
+                    target: target.0.code.to_string(),
+                    source: out::TranslateSource::Transcript,
+                }))
+            }
+            Message::OpenResult { folder } => {
+                Task::perform(pick_result(folder), Message::ResultPicked)
+            }
+            Message::ResultPicked(None) => Task::none(),
+            Message::ResultPicked(Some(path)) => Task::perform(
+                import_ui::on_thread(move || jobs::load_result(&path)),
+                Message::ResultLoaded,
+            ),
+            Message::ResultLoaded(Err(e)) => {
+                self.tell(&format!("That result could not be opened: {e}"), None);
+                Task::none()
+            }
+            Message::ResultLoaded(Ok(loaded)) => {
+                let id = self.add_loaded_result(loaded);
+                self.open_page(Page::Transcript(id))
+            }
+            Message::LocateMedia(id) => {
+                let name = self.job(id).map(Job::name).unwrap_or_default();
+                Task::perform(pick_media(name), move |path| {
+                    Message::MediaLocated(id, path)
+                })
+            }
+            Message::MediaLocated(_, None) => Task::none(),
+            Message::MediaLocated(id, Some(path)) => {
+                let Some(paths) = self.job(id).and_then(|j| j.paths.clone()) else {
+                    return Task::none();
+                };
+                if let Err(e) = jobs::locate_media(&paths, &path) {
+                    self.tell(
+                        &format!("The new place of the media could not be saved: {e}"),
+                        None,
+                    );
+                }
+                if let Some(j) = self.job_mut(id) {
+                    j.size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    j.path = path;
+                    j.media_missing = false;
+                }
+                Task::none()
+            }
             Message::MoreRows => {
                 self.shown += PAGE;
                 if let Page::Transcript(id) = self.page {
@@ -1153,7 +1455,9 @@ impl App {
                                 .iter()
                                 .skip(have)
                                 .take(self.shown.saturating_sub(have))
-                                .map(|u| text_editor::Content::with_text(&u.text))
+                                .map(|u| {
+                                    text_editor::Content::with_text(&clean_separators(&u.text))
+                                })
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -1188,12 +1492,8 @@ impl App {
                 }
             }
             Message::OpenFolder(id) => {
-                if let Some(dir) = self
-                    .job(id)
-                    .and_then(|j| j.outputs.first())
-                    .and_then(|p| p.parent())
-                {
-                    pipeline::open_in_file_manager(dir);
+                if let Some(paths) = self.job(id).and_then(|j| j.paths.as_ref()) {
+                    pipeline::open_in_file_manager(&paths.dir);
                 }
                 Task::none()
             }
@@ -1210,7 +1510,7 @@ impl App {
             },
             Message::RenameSpeaker(i, v) => {
                 if i < self.name_edits.len() {
-                    self.name_edits[i] = v;
+                    self.name_edits[i] = clean_separators(&v);
                 }
                 Task::none()
             }
@@ -1340,9 +1640,24 @@ impl App {
                 Task::batch([task.map(Message::Review), self.handle_out(out)])
             }
             Message::Jobs(msg) => {
+                let finished = match &msg {
+                    jobs::Msg::Event(jobs::RunEvent::Finished(finished)) => Some(finished.clone()),
+                    _ => None,
+                };
                 let (task, out) = jobs::update(&mut self.queue, msg);
-                let handled = self.handle_out(out);
-                Task::batch([task.map(Message::Jobs), handled, self.start_next()])
+                if let Some(jobs::Finished::Compared { job, .. }) = finished {
+                    self.reviewable.insert(job);
+                }
+                let reload = match finished {
+                    Some(jobs::Finished::Translated { .. })
+                        if matches!(self.page, Page::Player(_)) =>
+                    {
+                        self.update(Message::Player(player::Msg::ReloadTracks))
+                    }
+                    _ => Task::none(),
+                };
+                let handled = self.handle_job_out(out);
+                Task::batch([task.map(Message::Jobs), handled, reload, self.start_next()])
             }
         }
     }
@@ -1367,14 +1682,19 @@ impl App {
             player::subscription(&self.player).map(Message::Player),
             event::listen_with(|ev, status, _id| match ev {
                 iced::Event::Window(window::Event::FileDropped(path)) => {
-                    Some(Message::FilesPicked(vec![path]))
+                    Some(Message::FileDropped(path))
                 }
-                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                    key, modifiers, ..
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key,
+                    physical_key,
+                    modifiers,
+                    ..
                 }) => {
-                    use iced::keyboard::{Key, key::Named};
+                    use keyboard::{Key, key::Named};
+                    // shortcuts belong to the key, whichever layout is active (Persian, for example)
+                    let key = latin_key(key, physical_key);
                     match key.as_ref() {
-                        Key::Named(Named::Escape) => Some(Message::CloseSettings),
+                        Key::Named(Named::Escape) => Some(Message::Escape),
                         Key::Named(Named::F11) => Some(Message::ToggleFullscreen),
                         // Cmd on macOS, Ctrl elsewhere
                         Key::Character(",") if modifiers.command() => Some(Message::OpenSettings),
@@ -1401,11 +1721,24 @@ impl App {
         let t = self.tokens;
         let shell: Element<'_, Message> = responsive(move |size: Size| {
             let narrow = size.width < 760.0;
-            let content = match self.page {
+            let page = match self.page {
                 Page::Home => self.home_page(narrow),
                 Page::Transcript(id) => self.transcript_page(id),
-                Page::Player(_) => self.player_page(),
+                Page::Player(id) => self.player_page(id),
                 Page::Review(_) => review_ui::view(&self.review, t).map(Message::Review),
+            };
+            let content: Element<'_, Message> = match self.notice_banner() {
+                None => page,
+                // over the video, so that a message doesn't resize it during playback
+                Some(banner) if matches!(self.page, Page::Player(_)) => stack![
+                    page,
+                    container(opaque(container(banner).max_width(560)))
+                        // below the row with the back button
+                        .padding(iced::Padding::new(12.0).top(44.0))
+                        .width(Length::Fill)
+                ]
+                .into(),
+                Some(banner) => column![container(banner).padding([8, 16]), page].into(),
             };
             let divider = container(space::horizontal())
                 .width(Length::Fixed(1.0))
@@ -1678,47 +2011,26 @@ impl App {
                 .into()
         };
 
-        let mut page = column![header].spacing(18);
+        let open_saved = row![
+            text("Open a saved result:").size(12).color(t.muted),
+            button(text("Folder...").size(12))
+                .padding([4, 10])
+                .style(theme::ghost(t))
+                .on_press(Message::OpenResult { folder: true }),
+            button(text("File...").size(12))
+                .padding([4, 10])
+                .style(theme::ghost(t))
+                .on_press(Message::OpenResult { folder: false }),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
 
-        if let Some((lines, _)) = &self.notice {
-            let mut list = column![
-                text(if lines.len() == 1 {
-                    "1 file was not added".to_string()
-                } else {
-                    format!("{} files were not added", lines.len())
-                })
-                .size(14)
-                .font(semibold())
-                .color(t.text),
-            ]
-            .spacing(3)
-            .width(Length::Fill);
-            for l in lines {
-                list = list.push(text(l.clone()).size(12).color(t.muted));
-            }
-            if !self.waiting_for_ffmpeg.is_empty() {
-                list = list
-                    .push(space::vertical().height(Length::Fixed(6.0)))
-                    .push(self.ffmpeg_offer());
-            }
-            page = page.push(
-                container(
-                    row![
-                        icons::icon(icons::ALERT, 20.0, t.warn),
-                        list,
-                        button(icons::icon(icons::X, 14.0, t.muted))
-                            .padding(6)
-                            .style(theme::ghost(t))
-                            .on_press(Message::DismissNotice),
-                    ]
-                    .spacing(12)
-                    .align_y(Alignment::Start),
-                )
-                .padding(14)
-                .width(Length::Fill)
-                .style(theme::card(t)),
-            );
-        }
+        let mut page = column![
+            header,
+            open_saved,
+            jobs::view(&self.queue, t).map(Message::Jobs)
+        ]
+        .spacing(18);
 
         if self.detection.is_some() && !self.can_transcribe() {
             page = page.push(
@@ -1762,6 +2074,72 @@ impl App {
         .into()
     }
 
+    /// Everything the app has to tell the user, on any page. `None` when there is nothing.
+    fn notice_banner(&self) -> Option<Element<'_, Message>> {
+        if self.notice.is_none() && self.notices.is_empty() && self.review_ready.is_none() {
+            return None;
+        }
+        let t = self.tokens;
+        let heading = |line: String| text(line).size(14).font(semibold()).color(t.text);
+        let mut list = column![].spacing(3).width(Length::Fill);
+        if let Some(job) = self.review_ready {
+            list = list.push(
+                row![
+                    heading("The comparison is ready".to_string()).width(Length::Fill),
+                    button(text("Review").size(12))
+                        .padding([4, 10])
+                        .style(theme::primary(t))
+                        .on_press(Message::Go(Page::Review(job))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        if !self.notices.is_empty() {
+            list = list.push(heading(if self.notices.len() == 1 {
+                "Notice".to_string()
+            } else {
+                format!("{} notices", self.notices.len())
+            }));
+            for n in &self.notices {
+                list = list.push(text(n.text.clone()).size(12).color(t.muted));
+            }
+        }
+        if let Some((lines, _)) = &self.notice {
+            list = list.push(heading(if lines.len() == 1 {
+                "1 file was not added".to_string()
+            } else {
+                format!("{} files were not added", lines.len())
+            }));
+            for l in lines {
+                list = list.push(text(l.clone()).size(12).color(t.muted));
+            }
+            if !self.waiting_for_ffmpeg.is_empty() {
+                list = list
+                    .push(space::vertical().height(Length::Fixed(6.0)))
+                    .push(self.ffmpeg_offer());
+            }
+        }
+        Some(
+            container(
+                row![
+                    icons::icon(icons::ALERT, 20.0, t.warn),
+                    list,
+                    button(icons::icon(icons::X, 14.0, t.muted))
+                        .padding(6)
+                        .style(theme::ghost(t))
+                        .on_press(Message::DismissNotice),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Start),
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(theme::card(t))
+            .into(),
+        )
+    }
+
     fn empty_state(&self) -> Element<'_, Message> {
         let t = self.tokens;
         container(
@@ -1790,15 +2168,11 @@ impl App {
     fn job_card<'a>(&'a self, j: &'a Job) -> Element<'a, Message> {
         let t = self.tokens;
         let id = j.id;
-        let name = j
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = j.name();
         let folder = j
             .path
             .parent()
-            .map(|p| p.display().to_string())
+            .map(|p| clean_separators(&p.display().to_string()))
             .unwrap_or_default();
         let meta = format!("{}  -  {}", human(j.size), folder);
 
@@ -1878,7 +2252,7 @@ impl App {
             }
             JobState::Failed => {
                 if let Some(e) = &j.error {
-                    body = body.push(text(e.clone()).size(13).color(t.bad));
+                    body = body.push(text(clean_separators(e)).size(13).color(t.bad));
                 }
             }
             JobState::Done => {
@@ -1909,15 +2283,16 @@ impl App {
                         .on_press(Message::OpenFolder(id)),
                         button(
                             row![
-                                icons::icon(icons::FILE_TEXT, 15.0, t.on_accent),
+                                icons::icon(icons::FILE_TEXT, 15.0, t.text),
                                 text("View transcript").size(13)
                             ]
                             .spacing(6)
                             .align_y(Alignment::Center)
                         )
                         .padding([7, 12])
-                        .style(theme::primary(t))
+                        .style(theme::outline_btn(t))
                         .on_press(Message::OpenJob(id)),
+                        self.play_button(j),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -1930,7 +2305,7 @@ impl App {
             body = body.push(
                 row![
                     icons::icon(icons::ALERT, 13.0, t.warn),
-                    text(n.clone()).size(12).color(t.muted)
+                    text(clean_separators(n)).size(12).color(t.muted)
                 ]
                 .spacing(6),
             );
@@ -1986,6 +2361,68 @@ impl App {
             .width(Length::Fill)
             .style(theme::card(t))
             .into()
+    }
+
+    /// "Open player", or "Locate media" when the file is gone from where it was.
+    fn play_button<'a>(&self, j: &Job) -> Element<'a, Message> {
+        let t = self.tokens;
+        let (icon, label, message) = if j.media_missing {
+            (icons::VIDEO, "Locate media", Message::LocateMedia(j.id))
+        } else {
+            (icons::PLAY, "Open player", Message::Go(Page::Player(j.id)))
+        };
+        button(
+            row![icons::icon(icon, 15.0, t.on_accent), text(label).size(13)]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .padding([7, 12])
+        .style(theme::primary(t))
+        .on_press(message)
+        .into()
+    }
+
+    /// Looks on disk for a compare file of this job, so the Review button can show. Not done while
+    /// drawing, because the view runs often.
+    fn note_review_files(&mut self, id: u64) {
+        let found = self
+            .job(id)
+            .and_then(|j| j.paths.as_ref())
+            .is_some_and(review_ui::has_comparison);
+        if found {
+            self.reviewable.insert(id);
+        }
+    }
+
+    /// Adds a finished job rebuilt from disk, or finds the one already in the list. Returns its id.
+    fn add_loaded_result(&mut self, loaded: jobs::LoadedResult) -> u64 {
+        let jobs::LoadedResult {
+            media,
+            paths,
+            transcript,
+        } = loaded;
+        if let Some(j) = self.jobs.iter().find(|j| j.paths.as_ref() == Some(&paths)) {
+            return j.id;
+        }
+        let media_missing = media.is_none();
+        let path = media.unwrap_or_else(|| {
+            let name = std::path::Path::new(&transcript.source)
+                .file_name()
+                .map_or_else(|| paths.stem.clone().into(), ToOwned::to_owned);
+            paths.dir.join(name)
+        });
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut job = Job::new(id, path, size);
+        job.state = JobState::Done;
+        job.progress = 1.0;
+        job.outputs = vec![paths.transcript()];
+        job.transcript = Some(transcript);
+        job.paths = Some(paths);
+        job.media_missing = media_missing;
+        self.jobs.push(job);
+        id
     }
 
     /// Numbered steps, the current step's own progress bar, what it is doing, and time / system usage.
@@ -2108,7 +2545,7 @@ impl App {
         let detail = if j.detail.is_empty() {
             "Working...".to_string()
         } else {
-            j.detail.clone()
+            clean_separators(&j.detail)
         };
         col = col.push(
             row![
@@ -2253,11 +2690,7 @@ impl App {
         let Some(tr) = j.transcript.as_ref() else {
             return text("Transcript not found").into();
         };
-        let name = j
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = j.name();
         let copied_all = matches!(self.copied, Some((CopyTarget::All, _)));
 
         let header = row![
@@ -2303,15 +2736,16 @@ impl App {
             .on_press(Message::CopyText(id)),
             button(
                 row![
-                    icons::icon(icons::FOLDER, 15.0, t.on_accent),
+                    icons::icon(icons::FOLDER, 15.0, t.text),
                     text("Open folder").size(13)
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center)
             )
             .padding([8, 12])
-            .style(theme::primary(t))
+            .style(theme::outline_btn(t))
             .on_press(Message::OpenFolder(id)),
+            self.play_button(j),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -2327,7 +2761,7 @@ impl App {
                         .height(Length::Fixed(10.0))
                         .style(theme::disc(c)),
                     text_input(
-                        &s.name,
+                        &clean_separators(&s.name),
                         self.name_edits.get(i).map(String::as_str).unwrap_or("")
                     )
                     .on_input(move |v| Message::RenameSpeaker(i, v))
@@ -2362,7 +2796,7 @@ impl App {
         let mut list = column![].spacing(14);
         for (i, u) in tr.utterances.iter().enumerate().take(self.shown) {
             let c = t.speaker(u.speaker);
-            let who = tr.speaker_name(u.speaker);
+            let who = clean_separators(&tr.speaker_name(u.speaker));
             let initial = who
                 .chars()
                 .next()
@@ -2377,7 +2811,10 @@ impl App {
                     .padding(0)
                     .style(theme::selectable(t))
                     .into(),
-                None => text(u.text.clone()).size(15).color(t.text).into(),
+                None => text(clean_separators(&u.text))
+                    .size(15)
+                    .color(t.text)
+                    .into(),
             };
             list = list.push(
                 row![
@@ -2441,15 +2878,80 @@ impl App {
         }
 
         column![
-            container(column![header, legend].spacing(14))
-                .padding([18, 28])
-                .width(Length::Fill)
-                .style(theme::panel(t)),
+            container(
+                column![
+                    header,
+                    self.result_actions(id, tr),
+                    legend,
+                    jobs::view(&self.queue, t).map(Message::Jobs)
+                ]
+                .spacing(14)
+            )
+            .padding([18, 28])
+            .width(Length::Fill)
+            .style(theme::panel(t)),
             scrollable(container(list).padding([20, 28]).max_width(920))
                 .width(Length::Fill)
                 .height(Length::Fill),
         ]
         .into()
+    }
+
+    /// What can be done with a finished result: translate it, import subtitles, review a comparison.
+    fn result_actions<'a>(&'a self, id: u64, tr: &Transcript) -> Element<'a, Message> {
+        let t = self.tokens;
+        let source = engine::lang::language(&tr.language).map(|l| l.code);
+        // a translation into the transcript's own language would fail in the worker
+        let options: Vec<LanguageChoice> = LANGUAGES
+            .iter()
+            .filter(|l| Some(l.code) != source)
+            .map(LanguageChoice)
+            .collect();
+        let has_model = self.model_path(Role::Llm).is_some();
+        let target = self.translate_target.filter(|c| Some(c.0.code) != source);
+        let again = target
+            .zip(self.job(id).and_then(|j| j.paths.as_ref()))
+            .is_some_and(|(c, paths)| paths.translation(c.0.code).is_file());
+        let mut r = row![
+            pick_list(options, target, Message::TranslateTarget)
+                .placeholder("Translate to...")
+                .text_size(13)
+                .padding([6, 10])
+                .style(theme::pick(t)),
+            button(
+                text(if again {
+                    "Translate again"
+                } else {
+                    "Translate"
+                })
+                .size(13)
+            )
+            .padding([7, 12])
+            .style(theme::outline_btn(t))
+            .on_press_maybe((has_model && target.is_some()).then_some(Message::Translate(id))),
+            button(text("Import subtitles").size(13))
+                .padding([7, 12])
+                .style(theme::outline_btn(t))
+                .on_press(Message::OpenImport(id)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if self.reviewable.contains(&id) {
+            r = r.push(
+                button(text("Review").size(13))
+                    .padding([7, 12])
+                    .style(theme::outline_btn(t))
+                    .on_press(Message::Go(Page::Review(id))),
+            );
+        }
+        if !has_model {
+            r = r.push(
+                text("Translating needs the AI model: download it in Settings.")
+                    .size(12)
+                    .color(t.muted),
+            );
+        }
+        r.into()
     }
 
     // -------------------------------------------------------------- views: settings popup
@@ -2480,7 +2982,9 @@ impl App {
             t,
             "Results folder",
             column![
-                text(out.display().to_string()).size(13).color(t.muted),
+                text(clean_separators(&out.display().to_string()))
+                    .size(13)
+                    .color(t.muted),
                 row![
                     button(text("Change...").size(13))
                         .padding([7, 12])
@@ -2545,6 +3049,11 @@ impl App {
             appearance,
             folder,
             processing,
+            section(
+                t,
+                "Profiles",
+                profiles_ui::view(&self.profiles, &self.settings, t).map(Message::Profiles)
+            ),
             self.formats_section(),
             self.models_section()
         ]
@@ -2608,9 +3117,12 @@ impl App {
         let mut col = column![].spacing(6);
         if let Some(e) = &self.ffmpeg_err {
             col = col.push(
-                text(format!("The download did not work: {e}"))
-                    .size(12)
-                    .color(t.bad),
+                text(format!(
+                    "The download did not work: {}",
+                    clean_separators(e)
+                ))
+                .size(12)
+                .color(t.bad),
             );
         }
         match engine::tools::ffmpeg_download() {
@@ -2662,7 +3174,9 @@ impl App {
                     text(if ours { "ffmpeg ready (downloaded by ViPr) - extra formats are on" } else { "ffmpeg found - extra formats are on" })
                         .size(13)
                         .color(t.ok),
-                    text(p.display().to_string()).size(12).color(t.muted),
+                    text(clean_separators(&p.display().to_string()))
+                        .size(12)
+                        .color(t.muted),
                 ]
                 .spacing(2)
                 .width(Length::Fill),
@@ -2717,9 +3231,12 @@ impl App {
                 return section(
                     t,
                     "Models",
-                    text(format!("The model list could not be loaded: {e}"))
-                        .color(t.bad)
-                        .into(),
+                    text(format!(
+                        "The model list could not be loaded: {}",
+                        clean_separators(e)
+                    ))
+                    .color(t.bad)
+                    .into(),
                 );
             }
             Ok(r) => r,
@@ -2870,7 +3387,7 @@ impl App {
                 }
             } else if let Some(err) = self.errors.get(&m.id) {
                 row![
-                    text(format!("Download failed: {err}"))
+                    text(format!("Download failed: {}", clean_separators(err)))
                         .size(12)
                         .color(t.bad)
                         .width(Length::Fill),
@@ -3178,6 +3695,23 @@ async fn check_files(files: Vec<PathBuf>) -> Vec<(PathBuf, engine::audio::Probe)
     rx.await.unwrap_or_default()
 }
 
+/// A pressed key as its Latin letter, so shortcuts work on any keyboard layout. Keys without one are
+/// left as they are.
+fn latin_key(key: keyboard::Key, physical: keyboard::key::Physical) -> keyboard::Key {
+    use keyboard::key::{Code, Physical};
+    let latin = key.to_latin(physical).or(
+        // `to_latin` knows only letters and digits, and Settings is Ctrl+,
+        match (&key, physical) {
+            (keyboard::Key::Character(_), Physical::Code(Code::Comma)) => Some(','),
+            _ => None,
+        },
+    );
+    match latin {
+        Some(c) => keyboard::Key::Character(c.to_string().into()),
+        None => key,
+    }
+}
+
 /// Dev helper: `MT_SLOW=5000` delays hardware detection and the first usage reading by 5 s, to look at the loading states.
 fn test_delay() {
     if let Some(ms) = std::env::var("MT_SLOW")
@@ -3284,6 +3818,30 @@ async fn pick_ffmpeg() -> Option<PathBuf> {
     dialog.pick_file().await.map(|f| f.path().to_path_buf())
 }
 
+/// A result folder, or the `<stem>.json` inside one.
+async fn pick_result(folder: bool) -> Option<PathBuf> {
+    let dialog = rfd::AsyncFileDialog::new().set_title("Open a saved result");
+    let picked = if folder {
+        dialog.pick_folder().await
+    } else {
+        dialog
+            .add_filter("ViPr result", &["json"])
+            .pick_file()
+            .await
+    };
+    picked.map(|f| f.path().to_path_buf())
+}
+
+async fn pick_media(name: String) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title(format!("Locate {name}"))
+        .add_filter("Video / audio", MEDIA_EXTENSIONS)
+        .add_filter("All files", &["*"])
+        .pick_file()
+        .await
+        .map(|f| f.path().to_path_buf())
+}
+
 async fn pick_folder() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .set_title("Choose the results folder")
@@ -3351,4 +3909,35 @@ fn download_stream(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keyboard::Key;
+    use keyboard::key::{Code, Named, Physical};
+
+    #[test]
+    fn shortcut_keys_work_on_any_layout() {
+        let persian = |c: &str, code| latin_key(Key::Character(c.into()), Physical::Code(code));
+        assert_eq!(persian("\u{0645}", Code::KeyM), Key::Character("m".into()));
+        assert_eq!(persian("\u{0633}", Code::KeyS), Key::Character("s".into()));
+        assert_eq!(persian("\u{0648}", Code::Comma), Key::Character(",".into()));
+        // a Latin layout keeps its own letter, wherever that key is
+        assert_eq!(persian("z", Code::KeyY), Key::Character("z".into()));
+        let named = Key::Named(Named::Escape);
+        assert_eq!(
+            latin_key(named.clone(), Physical::Code(Code::Escape)),
+            named
+        );
+    }
+
+    #[test]
+    fn a_file_name_is_cleaned_before_it_is_shown() {
+        let name = "clip\u{2029}\u{0633}\u{0644}\u{0627}\u{0645} x.mp4";
+        let job = Job::new(1, std::path::Path::new("media").join(name), 0);
+        assert_eq!(job.path.file_name().unwrap().to_string_lossy(), name);
+        assert!(!job.name().contains('\u{2029}'));
+        assert!(job.name().contains("x.mp4"));
+    }
 }

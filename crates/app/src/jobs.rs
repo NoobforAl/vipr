@@ -7,9 +7,6 @@
 //!
 //! Everything a worker returns is checked here before it is saved, and all subtitle text is untrusted.
 
-// temporary: `view`, `load_result` and `locate_media` have no caller until integration
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -179,7 +176,7 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
             if error == CANCELLED {
                 Out::Notice(format!("{what} was cancelled."))
             } else {
-                Out::Notice(format!("{what} failed: {error}"))
+                Out::Alert(format!("{what} failed: {error}"))
             }
         }
         Msg::Skipped => Out::None,
@@ -263,7 +260,7 @@ pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
     for (index, kind) in state.queue.iter().enumerate() {
         list = list.push(
             row![
-                text(format!("Waiting: {}", label(kind)))
+                text(clean_separators(&format!("Waiting: {}", label(kind))))
                     .size(13)
                     .color(t.muted)
                     .width(Length::Fill),

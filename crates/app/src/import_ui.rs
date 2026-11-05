@@ -5,9 +5,6 @@
 //! `lang::clean_separators` right before any widget shows it, because some separators panic in
 //! cosmic-text (spikes/rtl).
 
-// temporary: `open` has no caller until integration adds the button
-#![allow(dead_code)]
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -147,6 +144,9 @@ pub struct State {
     preview: Option<Preview>,
     action: Action,
     target: Option<Target>,
+    /// The target language already has a translation, which this import would replace.
+    target_exists: bool,
+    overwrite_confirmed: bool,
     translations: Vec<String>,
     translation: Option<String>,
     reading: bool,
@@ -171,6 +171,7 @@ pub enum Msg {
     Encoding(EncodingChoice),
     Action(Action),
     Target(Target),
+    ConfirmOverwrite(bool),
     Translation(String),
     Start,
     Saved {
@@ -238,7 +239,15 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
         Msg::PreviewPaste => show_paste(state),
         Msg::Encoding(choice) => apply_encoding(state, choice),
         Msg::Action(action) => state.action = action,
-        Msg::Target(target) => state.target = Some(target),
+        Msg::Target(target) => {
+            state.target_exists = state
+                .job
+                .as_ref()
+                .is_some_and(|job| job.paths.translation(target.0.code).is_file());
+            state.overwrite_confirmed = false;
+            state.target = Some(target);
+        }
+        Msg::ConfirmOverwrite(confirmed) => state.overwrite_confirmed = confirmed,
         Msg::Translation(lang) => state.translation = Some(lang),
         Msg::Start => return (start(state), Out::None),
         Msg::Saved { generation, result } => {
@@ -372,7 +381,10 @@ fn saved(state: &mut State, result: Result<String, String>) -> Out {
 
 fn can_start(state: &State) -> bool {
     let has_cues = state.preview.as_ref().is_some_and(|p| !p.cues.is_empty());
+    let replaces_unconfirmed =
+        state.action == Action::Translate && state.target_exists && !state.overwrite_confirmed;
     has_cues
+        && !replaces_unconfirmed
         && job_for(
             0,
             state.action,
@@ -505,6 +517,8 @@ fn existing_translations(paths: &ProjectPaths) -> Vec<String> {
             let name = e.file_name();
             translation_lang(&name.to_string_lossy(), &paths.stem).map(str::to_string)
         })
+        // shown in a picker, and no language code holds these
+        .filter(|lang| lang::clean_separators(lang) == *lang)
         .collect();
     langs.sort();
     langs
@@ -781,12 +795,31 @@ fn action_view(state: &State, t: Tokens) -> Element<'_, Msg> {
     let detail: Element<'_, Msg> = match state.action {
         Action::Translate => {
             let targets: Vec<Target> = LANGUAGES.iter().map(Target).collect();
-            pick_list(targets, state.target, Msg::Target)
+            let picker = pick_list(targets, state.target, Msg::Target)
                 .placeholder("Target language")
                 .text_size(13)
                 .padding(8)
-                .style(theme::pick(t))
+                .style(theme::pick(t));
+            if state.target_exists {
+                column![
+                    picker,
+                    text(
+                        "This result already has a translation to that language. Translating this \
+                         file replaces it and its saved files. Your edits stay only on lines with \
+                         the same source text."
+                    )
+                    .size(12)
+                    .color(t.warn),
+                    button(text("Replace the existing translation").size(13))
+                        .padding([7, 12])
+                        .style(theme::segment(t, state.overwrite_confirmed))
+                        .on_press(Msg::ConfirmOverwrite(!state.overwrite_confirmed)),
+                ]
+                .spacing(8)
                 .into()
+            } else {
+                picker.into()
+            }
         }
         Action::CompareTranscript => {
             text("The AI picks the better line for each moment. You review its picks before anything is saved.")
@@ -983,6 +1016,41 @@ mod tests {
         assert!(!can_start(&state), "no target yet");
         state.action = Action::CompareTranslation;
         assert!(!can_start(&state), "no translation on disk");
+    }
+
+    #[test]
+    fn replacing_a_translation_needs_a_confirmation() {
+        let dir = TestDir::new("replace");
+        let paths = ProjectPaths::new(&dir.0, "a");
+        std::fs::write(paths.translation("fa"), "{}").unwrap();
+        let mut state = State {
+            job: Some(JobRef {
+                id: 1,
+                media: PathBuf::from("a.mp4"),
+                paths,
+            }),
+            preview: Some(preview(false)),
+            ..State::default()
+        };
+        let target = |code: &str| Target(lang::language(code).unwrap());
+
+        let _ = update(&mut state, Msg::Target(target("de")));
+        assert!(!state.target_exists);
+        assert!(can_start(&state), "nothing to replace");
+
+        let _ = update(&mut state, Msg::Target(target("fa")));
+        assert!(state.target_exists);
+        assert!(!can_start(&state), "would replace it unasked");
+        let _ = update(&mut state, Msg::ConfirmOverwrite(true));
+        assert!(can_start(&state));
+
+        // the confirmation was for that language only
+        let _ = update(&mut state, Msg::Target(target("de")));
+        let _ = update(&mut state, Msg::Target(target("fa")));
+        assert!(!can_start(&state));
+        // a compare doesn't touch the translation
+        state.action = Action::CompareTranscript;
+        assert!(can_start(&state));
     }
 
     #[test]

@@ -73,7 +73,7 @@ fn original_track(t: &Transcript) -> Track {
 }
 
 fn translation_track(lang: &str, file: &TranslationFile) -> Track {
-    let label = language(lang).map_or_else(|| lang.to_string(), |l| l.name.to_string());
+    let label = language(lang).map_or_else(|| clean_separators(lang), |l| l.name.to_string());
     let cues = file
         .cues
         .iter()

@@ -732,6 +732,11 @@ fn message_area<'a>(t: Tokens, message: &'a str, retry: Option<&'a str>) -> Elem
         .into()
 }
 
+/// A session is running, so [`position`] means something.
+pub fn is_playing(state: &State) -> bool {
+    state.phase == Phase::Playing
+}
+
 /// `marks` are drawn as ticks on the seek bar. They are owned by `marks_ui`.
 pub fn view<'a>(state: &'a State, tokens: Tokens, marks: &'a [Mark]) -> Element<'a, Msg> {
     match &state.phase {
@@ -757,8 +762,6 @@ pub fn view<'a>(state: &'a State, tokens: Tokens, marks: &'a [Mark]) -> Element<
 }
 
 /// True while the page should show `main.rs`'s `ffmpeg_offer`, which can install it.
-// temporary: integration wires this up
-#[allow(dead_code)]
 pub fn needs_ffmpeg(state: &State) -> bool {
     state.phase == Phase::NoFfmpeg
 }
@@ -813,10 +816,8 @@ pub fn key(state: &State, key: &Key, mods: Modifiers) -> Option<Msg> {
         Key::Named(Named::ArrowRight) => Some(Msg::Nudge(NUDGE_SECS)),
         Key::Named(Named::ArrowUp) => Some(Msg::Volume(state.volume + VOLUME_STEP)),
         Key::Named(Named::ArrowDown) => Some(Msg::Volume(state.volume - VOLUME_STEP)),
-        // the second is the same key on a Persian layout
-        Key::Character(c)
-            if (c.eq_ignore_ascii_case("s") || c == "س") && state.tracks.len() > 1 =>
-        {
+        // `main.rs` turns keys into their Latin letter, so this works on any layout
+        Key::Character(c) if c.eq_ignore_ascii_case("s") && state.tracks.len() > 1 => {
             Some(Msg::NextTrack)
         }
         _ => None,
@@ -937,7 +938,7 @@ mod tests {
             key(&s, &k(Named::ArrowUp), none),
             Some(Msg::Volume(_))
         ));
-        for c in ["s", "S", "س"] {
+        for c in ["s", "S"] {
             assert!(
                 matches!(
                     key(&s, &Key::Character(c.into()), none),

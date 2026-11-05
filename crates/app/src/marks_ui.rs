@@ -179,9 +179,28 @@ fn clock(time: f64) -> String {
     }
 }
 
-pub fn view(state: &State, tokens: Tokens) -> Element<'_, Msg> {
+/// `at` is where playback is now, `None` when nothing is playing, for the add buttons.
+pub fn view(state: &State, tokens: Tokens, at: Option<Position>) -> Element<'_, Msg> {
     let t = tokens;
-    let mut head = column![text("Marks").size(15).color(t.text)].spacing(4);
+    let add = |label: &'static str, kind: MarkKind| {
+        button(text(label).size(12))
+            .padding([5, 10])
+            .style(theme::outline_btn(t))
+            .on_press_maybe(
+                at.filter(|_| state.store.is_some())
+                    .map(|at| Msg::Add(kind, at)),
+            )
+    };
+    let mut head = column![
+        row![
+            text("Marks").size(15).color(t.text).width(Length::Fill),
+            add("Bookmark", MarkKind::Bookmark),
+            add("Flag line", MarkKind::Flag),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+    ]
+    .spacing(4);
     if let Some(problem) = &state.problem {
         head = head.push(text(problem.as_str()).size(12).color(t.bad));
     }

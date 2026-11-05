@@ -5,9 +5,6 @@
 //! its own state and returns an [`Out`] for anything beyond it; `main.rs` acts on that in
 //! `App::handle_out`, so owners can fill in their bodies without touching `main.rs`.
 
-// temporary: nothing produces most of this until the feature agents and integration are done
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 use engine::lang::{TextAlign, dir_align};
@@ -34,9 +31,10 @@ pub enum Out {
     PlayAt { job: u64, time: f64 },
     /// Queue background work. There is one worker slot, so this runs after what is running now.
     Enqueue(JobKind),
-    /// Tell the user something. For now this uses the banner for skipped files, which only the home
-    /// page draws and which is headed "N files were not added"; integration gives it its own heading.
+    /// Tell the user something. Shown on every page for a while, then it goes away by itself.
     Notice(String),
+    /// Like `Notice`, for something the user must not miss: it stays until dismissed.
+    Alert(String),
 }
 
 /// Background work on a finished job's results.

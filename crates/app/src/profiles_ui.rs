@@ -41,7 +41,7 @@ pub struct State {
     prompt: Content,
     glossary: Content,
     confirm_delete: bool,
-    /// From loading. Stays up for the session, wherever `Out::Notice` ends up being drawn.
+    /// From loading. Stays up for the session, and also goes out as `Out::Alert`.
     notice: Option<String>,
     save_error: Option<String>,
     /// The store holds edits the file doesn't.
@@ -77,7 +77,7 @@ pub enum Msg {
     SaveDue,
 }
 
-/// Load the store at start-up. A notice about a corrupt file comes back as `Out::Notice`.
+/// Load the store at start-up. A notice about a corrupt file comes back as `Out::Alert`.
 pub fn init(state: &mut State) -> (Task<Msg>, Out) {
     (
         Task::none(),
@@ -93,7 +93,7 @@ fn init_from(state: &mut State, path: &Path) -> Out {
     let notice = loaded.notice.as_deref().map(clean_separators);
     state.notice = notice.clone();
     select(state, first);
-    notice.map_or(Out::None, Out::Notice)
+    notice.map_or(Out::None, Out::Alert)
 }
 
 /// `settings.active_profile` lives in `settings`. `main.rs` saves `settings` when that changes.
@@ -540,7 +540,7 @@ mod tests {
         std::fs::write(dir.file(), "{not json").unwrap();
         let mut state = State::default();
         let out = init_from(&mut state, &dir.file());
-        assert!(matches!(out, Out::Notice(line) if line.contains(".bak")));
+        assert!(matches!(out, Out::Alert(line) if line.contains(".bak")));
         assert!(state.notice.is_some());
         assert!(state.selected.is_none());
     }
@@ -564,7 +564,7 @@ mod tests {
         std::fs::write(&path, r#"{"version":"abc سلام"}"#).unwrap();
         let (mut state, mut settings) = (State::default(), Settings::default());
         let out = init_from(&mut state, &path);
-        let Out::Notice(line) = out else {
+        let Out::Alert(line) = out else {
             panic!("expected a notice");
         };
         assert!(!has_separator(&line), "{line:?}");

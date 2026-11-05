@@ -313,14 +313,35 @@ fn output_lang(file: &CompareFile) -> Option<&str> {
     })
 }
 
+/// RLM at the start of each line that reads right to left. For saved text whose language isn't known,
+/// such as a transcript compared with an import.
+fn mark_rtl_lines(cues: &[Cue]) -> Vec<Cue> {
+    let mark = |line: &str| {
+        if lang::is_rtl_text(line) && !line.starts_with('\u{200F}') {
+            format!("\u{200F}{line}")
+        } else {
+            line.to_string()
+        }
+    };
+    cues.iter()
+        .map(|c| Cue {
+            text: c.text.split('\n').map(mark).collect::<Vec<_>>().join("\n"),
+            ..c.clone()
+        })
+        .collect()
+}
+
 /// RTL line marks go into the written files only, and never into the cues themselves.
 fn output_files(
     paths: &ProjectPaths,
     reviewed: &Reviewed,
     lang: Option<&str>,
 ) -> Vec<(PathBuf, String)> {
-    let marked = lang.map(|lang| subtitles::mark_rtl(&reviewed.cues, lang));
-    let cues = marked.as_deref().unwrap_or(&reviewed.cues);
+    let cues = match lang.filter(|code| lang::language(code).is_some_and(|l| l.rtl)) {
+        Some(code) => subtitles::mark_rtl(&reviewed.cues, code),
+        None => mark_rtl_lines(&reviewed.cues),
+    };
+    let cues = cues.as_slice();
     vec![
         (paths.reviewed("srt"), subtitles::to_srt(cues)),
         (paths.reviewed("vtt"), subtitles::to_vtt(cues)),
@@ -391,6 +412,11 @@ fn newest_compare(paths: &ProjectPaths) -> Option<PathBuf> {
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
         .map(|(_, path)| path)
+}
+
+/// This result has a comparison to review.
+pub fn has_comparison(paths: &ProjectPaths) -> bool {
+    newest_compare(paths).is_some()
 }
 
 fn load_newest(paths: &ProjectPaths) -> Result<Option<(PathBuf, CompareFile)>, String> {
@@ -1017,7 +1043,7 @@ fn row_view<'a>(
         let note = truncate_chars(&r.ai.reason, MAX_REASON_CHARS);
         col = col.push(
             row![
-                text("AI note").size(12).color(t.faint),
+                text("AI hint, may be wrong:").size(12).color(t.faint),
                 content_text(&note, 12.0, t.muted)
             ]
             .spacing(8),
@@ -1332,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn rtl_marks_reach_only_the_files_of_a_rtl_translation() {
+    fn rtl_marks_reach_only_the_files_with_rtl_text() {
         let paths = ProjectPaths::new("out", "a");
         let reviewed = reviewed_output(&[row(1, Some("سلام"), None, ai(AiChoice::A))]).unwrap();
         let body = |files: &[(PathBuf, String)], i: usize| files[i].1.clone();
@@ -1346,8 +1372,12 @@ mod tests {
         assert_eq!(body(&files, 2), "\u{200f}سلام\n");
         assert_eq!(reviewed.cues[0].text, "سلام", "the cue itself stays clean");
 
+        // a transcript compared with an import has no language, so each line decides for itself
         assert_eq!(output_lang(&file(vec![])), None);
         let files = output_files(&paths, &reviewed, None);
+        assert!(body(&files, 0).contains("\u{200f}سلام"));
+        let english = reviewed_output(&[row(1, Some("hello"), None, ai(AiChoice::A))]).unwrap();
+        let files = output_files(&paths, &english, None);
         assert!(!body(&files, 0).contains('\u{200f}'));
     }
 
