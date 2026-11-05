@@ -17,18 +17,26 @@ pub struct SubCue {
     pub text: String,
     /// `text` for the video overlay. Display only: never save this.
     pub overlay: String,
+    /// How many lines `text` needs in the timeline panel. Worked out once, since the panel asks for
+    /// every cue on every redraw.
+    pub panel_lines: u16,
 }
+
+/// Characters on one line of the timeline panel, on the low side so text is rarely cut off.
+const PANEL_LINE_CHARS: usize = 32;
 
 impl SubCue {
     fn new(id: u64, start: f64, end: f64, raw: &str) -> SubCue {
         let text = clean_separators(raw).trim().to_string();
         let overlay = isolate_rtl(&text);
+        let panel_lines = text.chars().count().div_ceil(PANEL_LINE_CHARS).max(1) as u16;
         SubCue {
             id,
             start,
             end,
             text,
             overlay,
+            panel_lines,
         }
     }
 }
@@ -60,6 +68,26 @@ impl Track {
         (after.saturating_sub(OVERLAP_LOOKBACK)..after)
             .rev()
             .find(|&i| time < self.cues[i].end)
+    }
+
+    /// Where "previous line" goes: the start of this line, or of the one before if this line has
+    /// only just begun, so that pressing twice keeps moving back.
+    pub fn prev_start(&self, time: f64) -> Option<f64> {
+        /// Further into a line than this, "previous" restarts it.
+        const RESTART_AFTER: f64 = 1.5;
+        let after = self.cues.partition_point(|c| c.start <= time);
+        let current = self.cues.get(after.checked_sub(1)?)?;
+        if time - current.start > RESTART_AFTER || after < 2 {
+            Some(current.start)
+        } else {
+            Some(self.cues[after - 2].start)
+        }
+    }
+
+    /// Where "next line" goes.
+    pub fn next_start(&self, time: f64) -> Option<f64> {
+        let after = self.cues.partition_point(|c| c.start <= time);
+        self.cues.get(after).map(|c| c.start)
     }
 }
 
@@ -153,6 +181,32 @@ mod tests {
         assert_eq!(t.cue_at(3.5).unwrap().id, 2);
         assert_eq!(t.cue_at(99.0), None);
         assert_eq!(track(vec![]).cue_at(1.0), None);
+    }
+
+    #[test]
+    fn previous_restarts_the_line_then_moves_back_and_next_moves_on() {
+        let t = track(vec![
+            cue(1, 10.0, 20.0, "a"),
+            cue(2, 30.0, 40.0, "b"),
+            cue(3, 50.0, 60.0, "c"),
+        ]);
+        assert_eq!(t.prev_start(5.0), None, "before the first line");
+        assert_eq!(t.prev_start(35.0), Some(30.0), "well into a line");
+        assert_eq!(t.prev_start(30.5), Some(10.0), "only just started");
+        assert_eq!(t.prev_start(10.2), Some(10.0), "nothing before the first");
+        assert_eq!(t.prev_start(45.0), Some(30.0), "between lines");
+        assert_eq!(t.next_start(5.0), Some(10.0));
+        assert_eq!(t.next_start(30.0), Some(50.0));
+        assert_eq!(t.next_start(55.0), None);
+        assert_eq!(track(vec![]).prev_start(1.0), None);
+    }
+
+    #[test]
+    fn panel_lines_grow_with_the_text() {
+        assert_eq!(cue(1, 0.0, 1.0, "short").panel_lines, 1);
+        assert_eq!(cue(2, 0.0, 1.0, &"x".repeat(65)).panel_lines, 3);
+        // counted in characters, not bytes
+        assert_eq!(cue(3, 0.0, 1.0, &"س".repeat(30)).panel_lines, 1);
     }
 
     #[test]

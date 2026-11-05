@@ -22,15 +22,18 @@ use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text::{self, Shaping, Wrapping};
 use iced::widget::{
-    button, column, container, row, scrollable, shader, slider, space, stack, text as label,
+    button, center, column, container, row, scrollable, shader, slider, space, stack, text as label,
 };
 use iced::{Alignment, Color, Element, Length, Subscription, Task};
 
+use crate::fade;
+use crate::icons;
 use crate::out::{JobRef, Out, Position, content_align};
 use crate::theme::{self, Tokens};
 
 use probe::Probe;
 use session::{Config, Session, Shared};
+pub use subs::SubCue;
 use subs::{Track, TrackSet, load_tracks};
 
 const NUDGE_SECS: f64 = 5.0;
@@ -41,9 +44,20 @@ const NO_SURFACE_AFTER: Duration = Duration::from_secs(4);
 const END_GRACE_SECS: f64 = 0.25;
 /// Cues shown before and after the current one in the audio-only view.
 const TRANSCRIPT_CONTEXT: usize = 3;
-/// Half the slider's handle: its rail is inset by this, and the mark ticks have to line up.
-const SLIDER_INSET: f32 = 7.0;
-const SEEK_BAR_HEIGHT: f32 = 16.0;
+/// Half the seek bar's marker: its travel is inset by this, and the mark ticks have to line up.
+const SLIDER_INSET: f32 = theme::SEEK_MARKER_WIDTH as f32 / 2.0;
+const SEEK_BAR_HEIGHT: f32 = 18.0;
+const VOLUME_HEIGHT: f32 = 22.0;
+const VOLUME_WIDTH: f32 = 96.0;
+/// A subtitle fades in and out over these, so that lines don't pop.
+const SUBTITLE_IN: Duration = Duration::from_millis(180);
+const SUBTITLE_OUT: Duration = Duration::from_millis(220);
+/// The picture comes up from black when the page opens.
+const PICTURE_IN: Duration = Duration::from_millis(500);
+/// A seek dims the picture a little, which hides the cut to the new place.
+const SEEK_DIM: f32 = 0.35;
+const SEEK_DIM_IN: Duration = Duration::from_millis(120);
+const SEEK_DIM_OUT: Duration = Duration::from_millis(280);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 enum Phase {
@@ -55,6 +69,13 @@ enum Phase {
     /// Can't play this, for the reason given.
     Failed(String),
     Playing,
+}
+
+/// A subtitle on its way in or out.
+#[derive(Debug)]
+struct Shown {
+    text: String,
+    since: Instant,
 }
 
 #[derive(Debug)]
@@ -80,11 +101,22 @@ pub struct State {
     pending_seek: Option<f64>,
     /// Kept between files.
     volume: f32,
+    /// What unmuting goes back to.
+    unmuted_volume: f32,
     opened_at: Option<Instant>,
     surface_seen: bool,
     no_surface: bool,
     video_failure_told: bool,
     notices: Vec<String>,
+    /// The subtitle on screen, and the one fading out.
+    shown: Option<Shown>,
+    leaving: Option<Shown>,
+    /// When the picture started to come up from black.
+    picture_since: Option<Instant>,
+    /// A seek is under way: when the picture started to dim.
+    dim_since: Option<Instant>,
+    /// A seek has landed: when the picture started to come back, and how dim it was.
+    undim_since: Option<(Instant, f32)>,
 }
 
 impl Default for State {
@@ -105,11 +137,17 @@ impl Default for State {
             seek_target: None,
             pending_seek: None,
             volume: 1.0,
+            unmuted_volume: 1.0,
             opened_at: None,
             surface_seen: false,
             no_surface: false,
             video_failure_told: false,
             notices: Vec::new(),
+            shown: None,
+            leaving: None,
+            picture_since: None,
+            dim_since: None,
+            undim_since: None,
         }
     }
 }
@@ -131,8 +169,13 @@ pub enum Msg {
     Started(u64, Option<Arc<Session>>),
     Tick,
     TogglePause,
+    /// Back to the start, paused.
+    Stop,
+    PrevLine,
+    NextLine,
     Nudge(f64),
     Volume(f32),
+    ToggleMute,
     SelectTrack(usize),
     NextTrack,
     /// Read the tracks again, after a translation finishes.
@@ -244,10 +287,11 @@ pub fn close(state: &mut State) {
     if let Some(session) = state.session.take() {
         session.shutdown();
     }
-    let volume = state.volume;
+    let (volume, unmuted_volume) = (state.volume, state.unmuted_volume);
     let token = state.token + 1;
     *state = State {
         volume,
+        unmuted_volume,
         token,
         ..State::default()
     };
@@ -271,6 +315,74 @@ fn seek(state: &mut State, target: f64) {
     session.seek(target);
     state.seek_target = Some(target);
     state.position = target;
+    state.dim_since.get_or_insert_with(Instant::now);
+    state.undim_since = None;
+}
+
+/// How dark the veil over the picture is now.
+fn picture_veil(state: &State) -> f32 {
+    let opening = match state.picture_since {
+        Some(since) => 1.0 - fade::eased(since, PICTURE_IN),
+        None if state.no_surface => 0.0,
+        None => 1.0,
+    };
+    let seeking = if let Some(since) = state.dim_since {
+        SEEK_DIM * fade::eased(since, SEEK_DIM_IN)
+    } else if let Some((since, from)) = state.undim_since {
+        from * (1.0 - fade::eased(since, SEEK_DIM_OUT))
+    } else {
+        0.0
+    };
+    opening.max(seeking)
+}
+
+/// Keep [`State::shown`] on the line for the current position, starting the fades when it changes.
+fn sync_subtitle(state: &mut State) {
+    let line = state
+        .tracks
+        .get(state.active)
+        .and_then(|t| t.cue_at(state.position))
+        .map(|c| c.overlay.as_str());
+    if state.shown.as_ref().map(|s| s.text.as_str()) == line {
+        return;
+    }
+    let since = Instant::now();
+    let line = line.map(|text| Shown {
+        text: text.to_string(),
+        since,
+    });
+    state.leaving = std::mem::replace(&mut state.shown, line).map(|s| Shown { since, ..s });
+}
+
+/// Something on screen is mid-fade, so it needs a redraw every frame.
+pub fn is_fading(state: &State) -> bool {
+    if state.phase != Phase::Playing {
+        return false;
+    }
+    let showing =
+        |s: &Option<Shown>, length| s.as_ref().is_some_and(|s| fade::running(s.since, length));
+    showing(&state.shown, SUBTITLE_IN)
+        || showing(&state.leaving, SUBTITLE_OUT)
+        || state
+            .picture_since
+            .is_some_and(|s| fade::running(s, PICTURE_IN))
+        || state
+            .dim_since
+            .is_some_and(|s| fade::running(s, SEEK_DIM_IN))
+        || state
+            .undim_since
+            .is_some_and(|(s, _)| fade::running(s, SEEK_DIM_OUT))
+}
+
+/// Where a jump from "now" starts, so repeated presses add up before the seek has landed.
+fn now(state: &State) -> f64 {
+    state.seek_target.unwrap_or(state.position)
+}
+
+fn apply_volume(state: &State) {
+    if let Some(session) = &state.session {
+        session.set_volume(state.volume);
+    }
 }
 
 fn tick(state: &mut State) {
@@ -279,6 +391,9 @@ fn tick(state: &mut State) {
     };
     if state.seek_target.is_some() && !shared.is_seeking() {
         state.seek_target = None;
+        if let Some(since) = state.dim_since.take() {
+            state.undim_since = Some((Instant::now(), SEEK_DIM * fade::eased(since, SEEK_DIM_IN)));
+        }
     }
     let clock = shared.clock.now();
     state.position = state.seek_target.unwrap_or(clock);
@@ -298,6 +413,7 @@ fn tick(state: &mut State) {
         if shared.surface_ready.load(Acquire) {
             state.surface_seen = true;
             state.no_surface = false;
+            state.picture_since = Some(Instant::now());
         } else if !state.no_surface
             && state
                 .opened_at
@@ -320,6 +436,12 @@ fn tick(state: &mut State) {
 }
 
 pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
+    let done = handle(state, msg);
+    sync_subtitle(state);
+    done
+}
+
+fn handle(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
     let mut task = Task::none();
     match msg {
         Msg::SeekTo(time) => seek(state, time),
@@ -341,15 +463,44 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
                 session.set_paused(state.paused);
             }
         }
-        Msg::Nudge(delta) => {
-            let from = state.seek_target.unwrap_or(state.position);
-            seek(state, from + delta);
+        Msg::Stop => {
+            seek(state, 0.0);
+            state.paused = true;
+            if let Some(session) = &state.session {
+                session.set_paused(true);
+            }
         }
+        Msg::PrevLine => {
+            let from = now(state);
+            let to = state
+                .tracks
+                .get(state.active)
+                .and_then(|t| t.prev_start(from));
+            seek(state, to.unwrap_or(0.0));
+        }
+        Msg::NextLine => {
+            let from = now(state);
+            let to = state
+                .tracks
+                .get(state.active)
+                .and_then(|t| t.next_start(from));
+            if let Some(to) = to {
+                seek(state, to);
+            }
+        }
+        Msg::Nudge(delta) => seek(state, now(state) + delta),
         Msg::Volume(volume) => {
             state.volume = volume.clamp(0.0, 1.0);
-            if let Some(session) = &state.session {
-                session.set_volume(state.volume);
+            apply_volume(state);
+        }
+        Msg::ToggleMute => {
+            if state.volume > 0.0 {
+                state.unmuted_volume = state.volume;
+                state.volume = 0.0;
+            } else {
+                state.volume = state.unmuted_volume.max(0.05);
             }
+            apply_volume(state);
         }
         Msg::SelectTrack(i) => {
             if i < state.tracks.len() {
@@ -508,7 +659,8 @@ fn seek_bar<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
         Msg::SeekTo,
     )
     .step(0.1)
-    .height(SEEK_BAR_HEIGHT);
+    .height(SEEK_BAR_HEIGHT)
+    .style(theme::seek_slider(t, SEEK_BAR_HEIGHT));
 
     // no widget here takes the mouse, so the slider under it still works everywhere
     let (ticks, tail) = tick_layout(marks, state.duration);
@@ -519,22 +671,66 @@ fn seek_bar<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
     for (portion, kind) in ticks {
         line = line.push(gap(portion));
         let color = match kind {
-            MarkKind::Bookmark => t.accent,
+            MarkKind::Bookmark => t.text,
             MarkKind::Flag => t.warn,
         };
         line = line.push(
             container(space())
                 .width(2)
-                .height(SEEK_BAR_HEIGHT - 4.0)
-                .style(theme::rounded_fill(color, 1.0)),
+                .height(SEEK_BAR_HEIGHT)
+                .style(theme::rounded_fill(color, 0.0)),
         );
     }
     line = line.push(gap(tail));
     stack![bar, line].width(Length::Fill).into()
 }
 
+fn tool<'a>(icon: &'static str, size: f32, msg: Msg, t: Tokens) -> Element<'a, Msg> {
+    button(icons::icon(icon, size, t.text))
+        .padding([5, 7])
+        .style(theme::flat(t, false))
+        .on_press(msg)
+        .into()
+}
+
+/// The speaker, then a box showing the level that is also the slider.
+fn volume_box<'a>(state: &'a State, t: Tokens) -> Element<'a, Msg> {
+    let speaker = if state.volume > 0.0 {
+        icons::VOLUME
+    } else {
+        icons::VOLUME_OFF
+    };
+    let level = slider(0.0..=1.0, state.volume, Msg::Volume)
+        .step(0.05f32)
+        .height(VOLUME_HEIGHT)
+        .width(VOLUME_WIDTH)
+        .style(theme::volume_slider(t, VOLUME_HEIGHT));
+    // text takes no mouse, so the slider under it still works
+    let percent = center(
+        label(format!("{:.0}%", state.volume * 100.0))
+            .size(13)
+            .color(t.text),
+    )
+    .width(VOLUME_WIDTH)
+    .height(VOLUME_HEIGHT);
+    row![
+        tool(speaker, 20.0, Msg::ToggleMute, t),
+        stack![level, percent]
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, Msg> {
     let playing = !state.paused && !state.finished;
+    let (play_icon, status) = if state.finished {
+        (icons::PLAY_SOLID, "Finished")
+    } else if playing {
+        (icons::PAUSE, "Playing")
+    } else {
+        (icons::PLAY_SOLID, "Paused")
+    };
     let time = if state.duration > 0.0 {
         format!(
             "{} / {}",
@@ -544,41 +740,64 @@ fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
     } else {
         clock_text(state.position)
     };
+
     let transport = row![
-        button(label(if playing { "Pause" } else { "Play" }).size(13))
-            .on_press(Msg::TogglePause)
-            .style(theme::outline_btn(t)),
-        label(time).size(12).color(t.muted),
-        seek_bar(state, t, marks),
-        label("Volume").size(12).color(t.muted),
-        slider(0.0..=1.0, state.volume, Msg::Volume)
-            .step(0.05f32)
-            .height(SEEK_BAR_HEIGHT)
-            .width(90),
+        tool(play_icon, 24.0, Msg::TogglePause, t),
+        tool(icons::STOP, 18.0, Msg::Stop, t),
+        space().width(8),
+        tool(icons::SKIP_BACK, 18.0, Msg::PrevLine, t),
+        tool(icons::REWIND, 18.0, Msg::Nudge(-NUDGE_SECS), t),
+        tool(icons::FAST_FORWARD, 18.0, Msg::Nudge(NUDGE_SECS), t),
+        tool(icons::SKIP_FORWARD, 18.0, Msg::NextLine, t),
+        space::horizontal(),
+        volume_box(state, t),
     ]
-    .spacing(10)
+    .spacing(2)
     .align_y(Alignment::Center);
 
-    let mut tracks = row![label("Subtitles").size(12).color(t.muted)]
-        .spacing(6)
-        .align_y(Alignment::Center);
+    let mut tracks = row![].spacing(4).align_y(Alignment::Center);
     for (i, track) in state.tracks.iter().enumerate() {
         tracks = tracks.push(
             button(label(track.label.as_str()).size(12))
+                .padding([2, 8])
                 .on_press(Msg::SelectTrack(i))
-                .style(theme::segment(t, i == state.active)),
+                .style(theme::flat(t, i == state.active)),
         );
     }
     if state.tracks.is_empty() {
-        tracks = tracks.push(label("None").size(12).color(t.faint));
+        tracks = tracks.push(label("No subtitles").size(12).color(t.faint));
     }
     tracks = tracks.push(
-        button(label("Refresh").size(12))
-            .on_press(Msg::ReloadTracks)
-            .style(theme::ghost(t)),
+        button(
+            row![
+                icons::icon(icons::REFRESH, 12.0, t.muted),
+                label("Refresh").size(12)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding([2, 8])
+        .on_press(Msg::ReloadTracks)
+        .style(theme::flat(t, false)),
     );
+    let status_line = container(
+        row![
+            label(status)
+                .size(12)
+                .color(t.text)
+                .width(Length::Fixed(58.0)),
+            tracks,
+            space::horizontal(),
+            label(time).size(12).color(t.text),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([3, 10])
+    .style(theme::strip(Tokens { surface: t.bg, ..t }));
 
-    let mut col = column![].spacing(8);
+    let mut col = column![].spacing(6);
     if state.no_surface {
         col = col.push(
             label(
@@ -598,11 +817,14 @@ fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
                 .wrapping(Wrapping::WordOrGlyph),
         );
     }
-    container(col.push(transport).push(tracks))
-        .width(Length::Fill)
-        .padding([10, 14])
-        .style(theme::strip(t))
-        .into()
+    column![
+        container(col.push(seek_bar(state, t, marks)).push(transport))
+            .width(Length::Fill)
+            .padding([6, 8])
+            .style(theme::strip(t)),
+        status_line,
+    ]
+    .into()
 }
 
 fn black<'a>(content: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -629,37 +851,53 @@ fn video_area(state: &State) -> Element<'_, Msg> {
         ),
         None => black(space().into()),
     };
-    let Some(cue) = state
-        .tracks
-        .get(state.active)
-        .and_then(|t| t.cue_at(state.position))
-    else {
-        return picture;
-    };
-    let line = container(
-        label(cue.overlay.as_str())
+    let mut layers = stack![picture].width(Length::Fill).height(Length::Fill);
+    let veil = picture_veil(state);
+    if veil > 0.0 {
+        layers = layers.push(
+            container(space())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::rounded_fill(
+                    Color::from_rgba(0.0, 0.0, 0.0, veil),
+                    0.0,
+                )),
+        );
+    }
+    if let Some(s) = state
+        .leaving
+        .as_ref()
+        .filter(|s| fade::running(s.since, SUBTITLE_OUT))
+    {
+        layers = layers.push(subtitle(&s.text, 1.0 - fade::eased(s.since, SUBTITLE_OUT)));
+    }
+    if let Some(s) = &state.shown {
+        layers = layers.push(subtitle(&s.text, fade::eased(s.since, SUBTITLE_IN)));
+    }
+    layers.into()
+}
+
+/// One subtitle over the picture, at the bottom. `strength` is how far it has faded in.
+fn subtitle(line: &str, strength: f32) -> Element<'_, Msg> {
+    let words = container(
+        label(line)
             .size(24)
-            .color(Color::WHITE)
+            .color(Color::from_rgba(1.0, 1.0, 1.0, strength))
             .align_x(text::Alignment::Center)
             .shaping(Shaping::Advanced)
             .wrapping(Wrapping::WordOrGlyph),
     )
     .padding([4, 12])
     .style(theme::rounded_fill(
-        Color::from_rgba(0.0, 0.0, 0.0, 0.65),
+        Color::from_rgba(0.0, 0.0, 0.0, 0.65 * strength),
         6.0,
     ));
-    stack![
-        picture,
-        column![
-            space().height(Length::Fill),
-            container(line)
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
-                .padding([12, 24]),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill),
+    column![
+        space().height(Length::Fill),
+        container(words)
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
+            .padding([12, 24]),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
@@ -824,6 +1062,19 @@ pub fn key(state: &State, key: &Key, mods: Modifiers) -> Option<Msg> {
     }
 }
 
+/// The lines of the track on screen, for the timeline panel.
+pub fn cues(state: &State) -> &[SubCue] {
+    state
+        .tracks
+        .get(state.active)
+        .map_or(&[], |t| t.cues.as_slice())
+}
+
+/// Which of [`cues`] is on screen.
+pub fn current_cue(state: &State) -> Option<usize> {
+    state.tracks.get(state.active)?.cue_index_at(state.position)
+}
+
 pub fn position(state: &State) -> Position {
     let time = match (&state.seek_target, &state.shared) {
         (Some(target), _) => *target,
@@ -986,6 +1237,116 @@ mod tests {
         assert_eq!(s.active, 2);
         set_tracks(&mut s, vec![new("Original")]);
         assert_eq!(s.active, 0);
+    }
+
+    fn timed_cues(starts: &[f64]) -> Track {
+        Track {
+            label: "T".to_string(),
+            cues: starts
+                .iter()
+                .enumerate()
+                .map(|(i, s)| SubCue {
+                    id: i as u64 + 1,
+                    start: *s,
+                    end: *s + 1.0,
+                    text: format!("line {i}"),
+                    overlay: format!("line {i}"),
+                    panel_lines: 1,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn line_buttons_jump_along_the_active_track() {
+        let mut s = playing_state();
+        s.tracks = vec![timed_cues(&[10.0, 20.0, 30.0])];
+        send(&mut s, Msg::NextLine);
+        assert_eq!(s.pending_seek, Some(10.0));
+        s.position = 25.0;
+        send(&mut s, Msg::PrevLine);
+        assert_eq!(s.pending_seek, Some(20.0));
+        s.position = 5.0;
+        send(&mut s, Msg::PrevLine);
+        assert_eq!(s.pending_seek, Some(0.0), "before the first line");
+        s.position = 35.0;
+        s.pending_seek = None;
+        send(&mut s, Msg::NextLine);
+        assert_eq!(s.pending_seek, None, "nothing after the last line");
+    }
+
+    #[test]
+    fn a_new_line_fades_in_while_the_old_one_fades_out() {
+        let mut s = playing_state();
+        s.tracks = vec![timed_cues(&[10.0, 11.0])];
+        s.position = 10.5;
+        send(&mut s, Msg::Tick);
+        let first = s.shown.as_ref().unwrap().since;
+        assert!(s.leaving.is_none());
+        assert!(is_fading(&s));
+
+        send(&mut s, Msg::Tick);
+        assert_eq!(
+            s.shown.as_ref().unwrap().since,
+            first,
+            "same line: no new fade"
+        );
+
+        s.position = 11.5;
+        send(&mut s, Msg::Tick);
+        assert!(s.shown.is_some() && s.leaving.is_some());
+
+        // past the last line nothing new comes, and the old one still fades out
+        s.position = 50.0;
+        send(&mut s, Msg::Tick);
+        assert!(s.shown.is_none() && s.leaving.is_some());
+    }
+
+    #[test]
+    fn the_veil_lifts_after_the_picture_comes_and_a_seek_only_dims_it() {
+        let mut s = playing_state();
+        s.surface_seen = false;
+        assert_eq!(picture_veil(&s), 1.0, "black until there is a picture");
+        s.picture_since = Instant::now().checked_sub(PICTURE_IN);
+        assert_eq!(picture_veil(&s), 0.0);
+        s.dim_since = Instant::now().checked_sub(SEEK_DIM_IN);
+        assert_eq!(picture_veil(&s), SEEK_DIM);
+        s.dim_since = None;
+        s.undim_since = Instant::now()
+            .checked_sub(SEEK_DIM_OUT)
+            .map(|at| (at, SEEK_DIM));
+        assert_eq!(picture_veil(&s), 0.0);
+    }
+
+    #[test]
+    fn mute_goes_back_to_the_level_before_it() {
+        let mut s = playing_state();
+        send(&mut s, Msg::Volume(0.6));
+        send(&mut s, Msg::ToggleMute);
+        assert_eq!(s.volume, 0.0);
+        send(&mut s, Msg::ToggleMute);
+        assert_eq!(s.volume, 0.6);
+    }
+
+    #[test]
+    fn stop_is_paused_and_waits_at_the_start() {
+        let mut s = playing_state();
+        s.position = 50.0;
+        send(&mut s, Msg::Stop);
+        assert!(s.paused);
+        assert_eq!(s.pending_seek, Some(0.0));
+    }
+
+    #[test]
+    fn the_panel_gets_the_lines_and_the_one_on_screen() {
+        let mut s = playing_state();
+        assert!(cues(&s).is_empty());
+        s.tracks = vec![timed_cues(&[10.0, 20.0])];
+        s.position = 20.5;
+        assert_eq!(cues(&s).len(), 2);
+        assert_eq!(current_cue(&s), Some(1));
+        s.position = 15.0;
+        assert_eq!(current_cue(&s), None);
     }
 
     #[test]

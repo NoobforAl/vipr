@@ -4,6 +4,7 @@
 //! a transcript viewer, and a Settings popup. Work is done by separate worker processes
 //! (see `pipeline.rs`); this file only draws and routes messages.
 
+mod fade;
 mod icons;
 mod import_ui;
 mod jobs;
@@ -13,6 +14,7 @@ mod pipeline;
 mod player;
 mod profiles_ui;
 mod review_ui;
+mod saver;
 mod theme;
 
 use std::collections::{HashMap, HashSet};
@@ -44,7 +46,8 @@ use theme::{DARK, LIGHT, Tokens};
 const APP_NAME: &str = "ViPr";
 const VERSION: &str = "0.1.0";
 
-/// Models listed in Settings (the translate role comes back with translation, after 0.1.0).
+/// Models every run needs, listed in Settings.
+/// `Role::Translate` is left out: it is optional and follows the cleanup model until one is chosen.
 const ROLES: [Role; 5] = [
     Role::Asr,
     Role::Vad,
@@ -52,6 +55,9 @@ const ROLES: [Role; 5] = [
     Role::DiarEmbedding,
     Role::Llm,
 ];
+
+/// A change of page fades in over this.
+const PAGE_FADE: Duration = Duration::from_millis(280);
 
 const CATEGORIES: [(&str, &str); 7] = [
     ("default", "General"),
@@ -112,7 +118,7 @@ fn log_panics() {
 
 fn main() -> iced::Result {
     log_panics();
-    iced::application(App::new, App::update, App::view)
+    iced::application(App::new, App::step, App::view)
         .title(|_: &App| format!("{APP_NAME} {VERSION}"))
         .theme(|app: &App| app.tokens.theme())
         .subscription(App::subscription)
@@ -419,6 +425,8 @@ enum Message {
     Key(iced::keyboard::Key, iced::keyboard::Modifiers),
     Player(player::Msg),
     Marks(marks_ui::Msg),
+    /// The screen is ready for the next step of whatever is moving.
+    Frame(Instant),
     Profiles(profiles_ui::Msg),
     Import(import_ui::Msg),
     Review(review_ui::Msg),
@@ -475,6 +483,8 @@ struct App {
     waiting_for_ffmpeg: Vec<PathBuf>,
     player: player::State,
     marks: marks_ui::State,
+    /// A page change is fading in: since when, and the old page's background.
+    page_fade: Option<(Instant, iced::Color)>,
     profiles: profiles_ui::State,
     import: import_ui::State,
     review: review_ui::State,
@@ -496,6 +506,13 @@ impl App {
                 {
                     selection.insert(role, id.clone());
                 }
+            }
+            if let Some(id) = settings
+                .models
+                .get(&Role::Translate)
+                .filter(|id| reg.get(id).is_ok_and(can_translate))
+            {
+                selection.insert(Role::Translate, id.clone());
             }
         }
         let mut app = App {
@@ -535,6 +552,7 @@ impl App {
             waiting_for_ffmpeg: Vec::new(),
             player: player::State::default(),
             marks: marks_ui::State::default(),
+            page_fade: None,
             profiles: profiles_ui::State::default(),
             import: import_ui::State::default(),
             review: review_ui::State::default(),
@@ -587,7 +605,11 @@ impl App {
             .iter()
             .map(|(r, id)| (*r, id.clone()))
             .collect();
-        let _ = self.settings.save(); // a failed save must not disturb the user
+        // on the save thread, so that a busy disk can't freeze the window
+        let settings = self.settings.clone();
+        saver::run(move || {
+            let _ = settings.save(); // a failed save must not disturb the user
+        });
     }
 
     fn output_dir(&self) -> PathBuf {
@@ -608,8 +630,20 @@ impl App {
         matches!(self.store.status(m), Status::Present).then(|| self.store.path_for(m))
     }
 
+    /// The model translations use: the one chosen for them, else the cleanup model. A chosen model
+    /// that isn't downloaded yet gives `None`, not a silent switch to a different model.
+    fn translate_model_path(&self) -> Option<PathBuf> {
+        self.model_path(translate_role(
+            self.selection.contains_key(&Role::Translate),
+        ))
+    }
+
     fn selected_entries(&self) -> Vec<&ModelEntry> {
-        ROLES.iter().filter_map(|r| self.entry(*r)).collect()
+        ROLES
+            .iter()
+            .chain(std::iter::once(&Role::Translate))
+            .filter_map(|r| self.entry(*r))
+            .collect()
     }
 
     /// Speech recognition and silence detection are required to transcribe.
@@ -814,29 +848,29 @@ impl App {
 
     /// The video and its controls, next to the marks.
     fn player_page(&self, id: u64) -> Element<'_, Message> {
-        let t = self.tokens;
+        let t = theme::PLAYER;
         let marks = marks_ui::marks(&self.marks);
         let name = self.job(id).map(Job::name).unwrap_or_default();
         let mut top = row![
-            button(icons::icon(icons::ARROW_LEFT, 15.0, t.text))
-                .padding(6)
-                .style(theme::ghost(t))
+            button(icons::icon(icons::BACK, 16.0, t.text))
+                .padding(5)
+                .style(theme::flat(t, false))
                 .on_press(Message::Go(Page::Transcript(id))),
             text(name).size(13).color(t.muted).width(Length::Fill),
         ]
         .spacing(8)
-        .padding([4, 8])
+        .padding([2, 8])
         .align_y(Alignment::Center);
         if self.reviewable.contains(&id) {
             top = top.push(
                 button(text("Review").size(12))
-                    .padding([4, 10])
-                    .style(theme::ghost(t))
+                    .padding([3, 10])
+                    .style(theme::flat(t, false))
                     .on_press(Message::Go(Page::Review(id))),
             );
         }
         let mut video = column![
-            top,
+            container(top).width(Length::Fill).style(theme::strip(t)),
             player::view(&self.player, t, marks).map(Message::Player)
         ]
         .width(Length::Fill)
@@ -845,11 +879,14 @@ impl App {
             video = video.push(container(self.ffmpeg_offer()).padding(12));
         }
         let at = player::is_playing(&self.player).then(|| player::position(&self.player));
-        row![
-            video,
-            marks_ui::view(&self.marks, t, at).map(Message::Marks)
-        ]
-        .into()
+        let panel = marks_ui::view(
+            &self.marks,
+            t,
+            at,
+            player::cues(&self.player),
+            player::current_cue(&self.player),
+        );
+        row![video, panel.map(Message::Marks)].into()
     }
 
     // -------------------------------------------------------------- pipeline control
@@ -859,9 +896,13 @@ impl App {
         let Some(kind) = jobs::next(&mut self.queue) else {
             return Task::none();
         };
+        let model = match kind {
+            out::JobKind::Translate { .. } => self.translate_model_path(),
+            out::JobKind::Compare { .. } => self.model_path(Role::Llm),
+        };
         let context = jobs::JobContext {
             job: self.job_ref(kind.job()),
-            model: self.model_path(Role::Llm),
+            model,
             profile: profiles_ui::active(&self.profiles, &self.settings),
         };
         let (task, out) = jobs::start(&mut self.queue, kind, context);
@@ -1053,6 +1094,8 @@ impl App {
                 player::close(&mut self.player);
                 marks_ui::flush(&mut self.marks);
                 profiles_ui::flush(&mut self.profiles);
+                // the last click's save has to land before the process goes
+                saver::wait();
                 // an open row editor ends with a write, which has to finish before the window goes
                 let (write, _) = review_ui::update(&mut self.review, review_ui::Msg::Back);
                 let write = write.map(Message::Review);
@@ -1580,7 +1623,12 @@ impl App {
                 Task::none()
             }
             Message::Pick(role, choice) => {
-                self.selection.insert(role, choice.id);
+                if choice.id.is_empty() {
+                    // "Same as text cleanup"
+                    self.selection.remove(&role);
+                } else {
+                    self.selection.insert(role, choice.id);
+                }
                 self.save_settings();
                 Task::none()
             }
@@ -1615,8 +1663,23 @@ impl App {
             }
 
             Message::Key(key, mods) => self.route_key(key, mods),
+            Message::Frame(at) => {
+                if self
+                    .page_fade
+                    .is_some_and(|(since, _)| !fade::running(since, PAGE_FADE))
+                {
+                    self.page_fade = None;
+                }
+                marks_ui::frame(&mut self.marks, at).map(Message::Marks)
+            }
             Message::Player(msg) => {
                 let (task, out) = player::update(&mut self.player, msg);
+                marks_ui::follow(
+                    &mut self.marks,
+                    player::cues(&self.player),
+                    player::current_cue(&self.player),
+                    player::position(&self.player).time,
+                );
                 Task::batch([task.map(Message::Player), self.handle_out(out)])
             }
             Message::Marks(msg) => {
@@ -1662,6 +1725,23 @@ impl App {
         }
     }
 
+    /// `update`, and a soft change when it moved to another page.
+    fn step(&mut self, message: Message) -> Task<Message> {
+        let (page, background) = (self.page, self.chrome_tokens().bg);
+        let task = self.update(message);
+        if self.page != page {
+            self.page_fade = Some((Instant::now(), background));
+        }
+        task
+    }
+
+    /// Something on screen is mid-motion and needs a redraw every frame.
+    fn animating(&self) -> bool {
+        self.page_fade.is_some()
+            || (matches!(self.page, Page::Player(_))
+                && (player::is_fading(&self.player) || marks_ui::is_animating(&self.marks)))
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         // system usage is only sampled while it is shown (Settings) or useful (a job is running)
         let usage = if self.settings_open || self.running.is_some() {
@@ -1674,9 +1754,15 @@ impl App {
         } else {
             Subscription::none()
         };
+        let frames = if self.animating() {
+            window::frames().map(Message::Frame)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             usage,
             tick,
+            frames,
             iced::system::theme_changes().map(Message::SystemTheme),
             window::close_requests().map(|_| Message::CloseWindow),
             player::subscription(&self.player).map(Message::Player),
@@ -1744,7 +1830,8 @@ impl App {
                 .width(Length::Fixed(1.0))
                 .height(Length::Fill)
                 .style(theme::divider(t));
-            let body: Element<'_, Message> = if narrow {
+            // the player keeps the whole window, as a media player does; its back button leaves
+            let body: Element<'_, Message> = if narrow || matches!(self.page, Page::Player(_)) {
                 content
             } else {
                 row![self.sidebar(), divider, content].into()
@@ -1761,9 +1848,24 @@ impl App {
                 .padding(1)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .style(theme::window_frame(t, framed, radius))
+                .style(theme::window_frame(self.chrome_tokens(), framed, radius))
                 .into(),
         ];
+
+        // the new page comes up through a veil that starts as the old page's background, so the
+        // window never changes brightness at a stroke
+        if let Some((since, from)) = self.page_fade {
+            let done = fade::eased(since, PAGE_FADE);
+            let veil =
+                theme::with_alpha(theme::mix(from, self.chrome_tokens().bg, done), 1.0 - done);
+            layers.push(
+                container(space())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(theme::rounded_fill(veil, radius))
+                    .into(),
+            );
+        }
 
         if self.settings_open {
             layers.push(opaque(
@@ -1796,8 +1898,17 @@ impl App {
 
     /// Top strip: drag area, (settings button on narrow windows) and the window buttons.
     /// macOS: native traffic lights live in the reserved space on the left, so no buttons are drawn.
+    /// The window's own frame and title strip: dark around the player whatever the app's theme is.
+    fn chrome_tokens(&self) -> Tokens {
+        if matches!(self.page, Page::Player(_)) {
+            theme::PLAYER
+        } else {
+            self.tokens
+        }
+    }
+
     fn titlebar(&self, narrow: bool) -> Element<'_, Message> {
-        let t = self.tokens;
+        let t = self.chrome_tokens();
         let height = if MAC { 40.0 } else { 36.0 };
         let drag = mouse_area(
             container(space::horizontal())
@@ -2907,7 +3018,7 @@ impl App {
             .filter(|l| Some(l.code) != source)
             .map(LanguageChoice)
             .collect();
-        let has_model = self.model_path(Role::Llm).is_some();
+        let has_model = self.translate_model_path().is_some();
         let target = self.translate_target.filter(|c| Some(c.0.code) != source);
         let again = target
             .zip(self.job(id).and_then(|j| j.paths.as_ref()))
@@ -2946,7 +3057,7 @@ impl App {
         }
         if !has_model {
             r = r.push(
-                text("Translating needs the AI model: download it in Settings.")
+                text("Translating needs its AI model: download it in Settings.")
                     .size(12)
                     .color(t.muted),
             );
@@ -3279,7 +3390,7 @@ impl App {
                 text(format!(
                     "{} of {} models still need downloading ({})",
                     missing.len(),
-                    ROLES.len(),
+                    self.selected_entries().len(),
                     human(missing_bytes)
                 ))
                 .size(13)
@@ -3305,6 +3416,8 @@ impl App {
         for role in ROLES {
             col = col.push(self.model_row(reg, role, det));
         }
+        // right after text cleanup, the last of the models above
+        col = col.push(self.model_row(reg, Role::Translate, det));
         section(t, "Models", col.into())
     }
 
@@ -3315,18 +3428,28 @@ impl App {
         det: &'a Detection,
     ) -> Element<'a, Message> {
         let t = self.tokens;
-        let options: Vec<Choice> = reg
+        let mut options: Vec<Choice> = reg
             .for_role(role)
+            .filter(|m| role != Role::Translate || can_translate(m))
             .map(|m| Choice {
                 id: m.id.clone(),
                 label: m.name.clone(),
             })
             .collect();
-        let selected = self
-            .selection
-            .get(&role)
-            .and_then(|id| options.iter().find(|c| &c.id == id))
-            .cloned();
+        if role == Role::Translate {
+            options.insert(
+                0,
+                Choice {
+                    id: String::new(),
+                    label: "Same as text cleanup".to_string(),
+                },
+            );
+        }
+        let selected = match self.selection.get(&role) {
+            Some(id) => options.iter().find(|c| &c.id == id).cloned(),
+            None if role == Role::Translate => options.first().cloned(),
+            None => None,
+        };
         let entry = self.selection.get(&role).and_then(|id| reg.get(id).ok());
 
         let mut right = column![
@@ -3507,6 +3630,21 @@ fn is_audio_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| AUDIO.contains(&e.to_lowercase().as_str()))
+}
+
+/// Models tagged for translation only each need a prompt format of their own, which isn't wired up
+/// (`jobs::model_id` refuses them), so they aren't offered.
+fn can_translate(model: &ModelEntry) -> bool {
+    model.has_role(Role::Translate) && model.has_role(Role::Llm)
+}
+
+/// Whose model a translation runs on.
+fn translate_role(own_model_chosen: bool) -> Role {
+    if own_model_chosen {
+        Role::Translate
+    } else {
+        Role::Llm
+    }
 }
 
 fn role_label(role: Role) -> &'static str {
@@ -3913,6 +4051,12 @@ fn download_stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn translation_uses_its_own_model_only_once_one_is_chosen() {
+        assert_eq!(super::translate_role(false), super::Role::Llm);
+        assert_eq!(super::translate_role(true), super::Role::Translate);
+    }
+
     use super::*;
     use keyboard::Key;
     use keyboard::key::{Code, Named, Physical};

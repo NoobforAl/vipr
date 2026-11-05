@@ -2,7 +2,9 @@
 //! surfaces, one soft accent, hairline borders, generous radii, no shadows or ripples.
 
 use iced::theme::Palette;
-use iced::widget::{button, container, pick_list, progress_bar, text_editor, text_input};
+use iced::widget::{
+    button, container, pick_list, progress_bar, scrollable, slider, text_editor, text_input,
+};
 use iced::{Background, Border, Color, Shadow, Theme, border};
 
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +61,24 @@ pub const LIGHT: Tokens = Tokens {
     warn: hex(0x845D00),
     bad: hex(0xB1362C),
     bubble: hex(0xFFFFFF),
+};
+
+/// The player page in any app theme: the dark, flat look of a classic desktop media player.
+pub const PLAYER: Tokens = Tokens {
+    dark: true,
+    bg: hex(0x1F1F1F),
+    surface: hex(0x2B2B2B),
+    hover: hex(0x3A3A3A),
+    rule: hex(0x3F3F3F),
+    text: hex(0xE6E6E6),
+    muted: hex(0xA8A8A8),
+    faint: hex(0x707070),
+    accent: hex(0x2F9BE0),
+    on_accent: hex(0xFFFFFF),
+    ok: hex(0x7BCF95),
+    warn: hex(0xE2BA55),
+    bad: hex(0xE57A7A),
+    bubble: hex(0x262626),
 };
 
 pub const RADIUS_S: f32 = 10.0;
@@ -327,6 +347,137 @@ pub fn segment(t: Tokens, selected: bool) -> impl Fn(&Theme, button::Status) -> 
             ),
             ..Default::default()
         }
+    }
+}
+
+// ------------------------------------------------------------------ player
+
+/// Square toolbar button: nothing until hovered, tinted when `selected`.
+pub fn flat(t: Tokens, selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = if selected {
+            Some(Background::Color(with_alpha(t.accent, 0.28)))
+        } else if hovered {
+            Some(Background::Color(t.hover))
+        } else {
+            None
+        };
+        button::Style {
+            background,
+            text_color: match status {
+                button::Status::Disabled => t.faint,
+                _ if selected || hovered => t.text,
+                _ => t.muted,
+            },
+            border: Border {
+                radius: border::radius(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// A flat fill with a one pixel edge.
+pub fn flat_card(t: Tokens) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(t.bubble)),
+        border: Border {
+            color: t.rule,
+            width: 1.0,
+            radius: border::radius(2),
+        },
+        ..Default::default()
+    }
+}
+
+/// The subtitle line on screen in the timeline.
+pub fn current_line(t: Tokens, strength: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(with_alpha(t.accent, 0.22 * strength))),
+        border: Border {
+            radius: border::radius(2),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// A bar as tall as the widget with a thin marker. `filled` is the part already played.
+fn bar_slider(
+    filled: Color,
+    rest: Color,
+    edge: Color,
+    marker: Color,
+    marker_width: u16,
+    height: f32,
+) -> impl Fn(&Theme, slider::Status) -> slider::Style {
+    move |_, _| slider::Style {
+        rail: slider::Rail {
+            backgrounds: (Background::Color(filled), Background::Color(rest)),
+            width: height,
+            border: Border {
+                color: edge,
+                width: 1.0,
+                radius: border::radius(0),
+            },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Rectangle {
+                width: marker_width,
+                border_radius: border::radius(0),
+            },
+            background: Background::Color(marker),
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+        },
+    }
+}
+
+/// `height` has to match the widget's: the rail is drawn at this height whatever the layout says.
+pub fn seek_slider(t: Tokens, height: f32) -> impl Fn(&Theme, slider::Status) -> slider::Style {
+    bar_slider(
+        t.rule,
+        t.surface,
+        t.rule,
+        t.accent,
+        SEEK_MARKER_WIDTH,
+        height,
+    )
+}
+
+pub fn volume_slider(t: Tokens, height: f32) -> impl Fn(&Theme, slider::Status) -> slider::Style {
+    bar_slider(
+        with_alpha(t.accent, 0.45),
+        t.bg,
+        t.rule,
+        t.accent,
+        2,
+        height,
+    )
+}
+
+/// Width of the seek bar's marker. Ticks on the bar have to be inset by half of it to line up.
+pub const SEEK_MARKER_WIDTH: u16 = 4;
+
+/// Scrollbars that belong on a dark panel, in any app theme.
+pub fn dark_scroll(t: Tokens) -> impl Fn(&Theme, scrollable::Status) -> scrollable::Style {
+    move |theme, status| {
+        let mut style = scrollable::default(theme, status);
+        let scroller = scrollable::Scroller {
+            background: Background::Color(t.rule),
+            border: Border {
+                radius: border::radius(2),
+                ..Default::default()
+            },
+        };
+        style.vertical_rail = scrollable::Rail {
+            background: None,
+            border: Border::default(),
+            scroller,
+        };
+        style
     }
 }
 

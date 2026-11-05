@@ -49,6 +49,25 @@ pub const CPU: &str = icon_src!(
 pub const ALERT: &str =
     icon_src!(r#"<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>"#);
 
+// The player page: Phosphor Icons (MIT licence, assets/icons/phosphor/LICENSE).
+pub const PLAY_SOLID: &str = include_str!("../../../assets/icons/phosphor/play-fill.svg");
+pub const PAUSE: &str = include_str!("../../../assets/icons/phosphor/pause-fill.svg");
+pub const STOP: &str = include_str!("../../../assets/icons/phosphor/stop-fill.svg");
+pub const SKIP_BACK: &str = include_str!("../../../assets/icons/phosphor/skip-back-fill.svg");
+pub const SKIP_FORWARD: &str = include_str!("../../../assets/icons/phosphor/skip-forward-fill.svg");
+pub const REWIND: &str = include_str!("../../../assets/icons/phosphor/rewind-fill.svg");
+pub const FAST_FORWARD: &str = include_str!("../../../assets/icons/phosphor/fast-forward-fill.svg");
+pub const VOLUME: &str = include_str!("../../../assets/icons/phosphor/speaker-high-fill.svg");
+pub const VOLUME_OFF: &str = include_str!("../../../assets/icons/phosphor/speaker-x-fill.svg");
+pub const FLAG: &str = include_str!("../../../assets/icons/phosphor/flag.svg");
+pub const FLAG_SOLID: &str = include_str!("../../../assets/icons/phosphor/flag-fill.svg");
+pub const MARK_PLUS: &str = include_str!("../../../assets/icons/phosphor/plus.svg");
+pub const CLOSE: &str = include_str!("../../../assets/icons/phosphor/x.svg");
+pub const BACK: &str = include_str!("../../../assets/icons/phosphor/arrow-left.svg");
+pub const BOOKMARK: &str = include_str!("../../../assets/icons/phosphor/bookmark-simple.svg");
+pub const REFRESH: &str = include_str!("../../../assets/icons/phosphor/arrow-clockwise.svg");
+pub const FOLLOW: &str = include_str!("../../../assets/icons/phosphor/crosshair-simple.svg");
+
 /// Spinner: a faint full ring with a bright quarter arc on top; rotate it to animate.
 pub const SPINNER: &str = icon_src!(
     r#"<circle cx="12" cy="12" r="9" stroke-opacity="0.22"/><path d="M12 3a9 9 0 0 1 9 9" stroke-width="2.8"/>"#

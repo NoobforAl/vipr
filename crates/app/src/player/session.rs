@@ -24,6 +24,8 @@ const LAG_RESTART_SECS: f64 = 2.0;
 const LAG_RESTART_AHEAD_SECS: f64 = 0.5;
 const AUDIO_PREFILL_SECS: f64 = 0.1;
 const AUDIO_RING_SECS: usize = 2;
+/// Sound rises over this after opening, a seek or a pause, instead of starting at full level.
+const AUDIO_RAMP_SECS: f32 = 0.15;
 /// Just under full scale: the I24 conversion does not saturate, so exactly 1.0 lands out of range.
 const MAX_SAMPLE: f32 = 1.0 - f32::EPSILON / 2.0;
 /// Buffers above this are freed, not kept, when the renderer briefly holds more than usual.
@@ -300,6 +302,8 @@ pub struct Shared {
     no_surface: AtomicBool,
     /// The device went away: the session moves to the wall clock on the next tick.
     audio_failed: AtomicBool,
+    /// Sound is resuming after a pause: the callback eases it in again.
+    ramp_restart: AtomicBool,
     volume: AtomicU32,
     pub frame_interval: f64,
 }
@@ -331,6 +335,7 @@ impl Shared {
             surface_ready: AtomicBool::new(false),
             no_surface: AtomicBool::new(false),
             audio_failed: AtomicBool::new(false),
+            ramp_restart: AtomicBool::new(false),
             volume: AtomicU32::new(volume.to_bits()),
             frame_interval: 1.0 / fps,
         })
@@ -556,6 +561,10 @@ struct Callback {
     return_tx: Producer<Consumer<f32>>,
     frames: u64,
     ready: bool,
+    /// 0 to 1: how far the sound has eased in.
+    ramp: f32,
+    /// Where `ramp` restarts: 0, or 1 for no easing.
+    ramp_start: f32,
 }
 
 impl Callback {
@@ -566,9 +575,13 @@ impl Callback {
             }
             self.frames = 0;
             self.ready = false;
+            self.ramp = self.ramp_start;
         }
 
         let shared = &self.shared;
+        if shared.ramp_restart.swap(false, AcqRel) {
+            self.ramp = self.ramp_start;
+        }
         let clock = &shared.clock;
         // Some backends can't really pause, and closing must silence the ring at once.
         if shared.stop.load(Acquire) || shared.is_paused() {
@@ -598,8 +611,10 @@ impl Callback {
         {
             let gain = f32::from_bits(shared.volume.load(Relaxed));
             let (a, b) = chunk.as_slices();
+            let ramp_step = 1.0 / (self.rate as f32 * AUDIO_RAMP_SECS * self.channels as f32);
             for (o, s) in out.iter_mut().zip(a.iter().chain(b.iter())) {
-                *o = T::from_sample((*s * gain).clamp(-1.0, MAX_SAMPLE));
+                *o = T::from_sample((*s * gain * self.ramp).clamp(-1.0, MAX_SAMPLE));
+                self.ramp = (self.ramp + ramp_step).min(1.0);
             }
             chunk.commit_all();
         }
@@ -680,6 +695,8 @@ fn open_audio(shared: &Arc<Shared>) -> Result<AudioOut, String> {
         return_tx,
         frames: 0,
         ready: false,
+        ramp: 0.0,
+        ramp_start: 0.0,
     };
     let stream = match format {
         SampleFormat::F32 => build_stream::<f32>(&device, config, cb),
@@ -986,6 +1003,7 @@ impl Session {
                 let _ = audio.out.stream.pause();
             }
         } else if let Some(audio) = guard.as_mut() {
+            shared.ramp_restart.store(true, Release);
             flush_swap(audio);
             let _ = audio.out.stream.play();
         } else if !shared.hold.load(Acquire) {
@@ -1281,6 +1299,8 @@ mod tests {
                 return_tx,
                 frames: 0,
                 ready: false,
+                ramp: 1.0,
+                ramp_start: 1.0,
             },
             swap_tx,
             producer: Some(producer),
@@ -1295,6 +1315,24 @@ mod tests {
         let mut v = first.to_vec();
         v.resize(PREFILL, 0.25);
         v
+    }
+
+    #[test]
+    fn sound_eases_in_after_a_new_start_and_after_a_pause() {
+        let mut r = rig(&vec![0.5; PREFILL * 4]);
+        r.cb.ramp_start = 0.0;
+        let channels = 2.0;
+        let full_after = (48000.0 * AUDIO_RAMP_SECS * channels) as usize + 2;
+        let mut out = vec![9.0f32; full_after];
+        r.cb.render(&mut out, 0);
+        assert_eq!(out[0], 0.0, "starts silent");
+        assert!(out[full_after / 2] > 0.2 && out[full_after / 2] < 0.3);
+        assert_eq!(out[full_after - 1], 0.5, "reaches the full level");
+
+        r.cb.shared.ramp_restart.store(true, Release);
+        let mut out = [9.0f32; 2];
+        r.cb.render(&mut out, 0);
+        assert_eq!(out[0], 0.0, "starts silent again after a pause");
     }
 
     #[test]
