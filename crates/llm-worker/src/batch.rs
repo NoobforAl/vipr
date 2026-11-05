@@ -76,6 +76,19 @@ impl<C: Chat> Chat for FitContext<C> {
 pub fn run_chunks<T, R>(
     items: &[T],
     chunk_size: usize,
+    call: impl FnMut(&[T], bool) -> Result<Vec<R>>,
+    give_up: impl FnMut(&T) -> R,
+    on_done: impl FnMut(&[R], usize),
+) -> Result<Vec<R>> {
+    run_weighted_chunks(items, chunk_size, |_| 1, call, give_up, on_done)
+}
+
+/// [`run_chunks`] for items of different sizes: a chunk's weights add up to at most `max_weight`, though
+/// a heavier item still gets a chunk of its own.
+pub fn run_weighted_chunks<T, R>(
+    items: &[T],
+    max_weight: usize,
+    weight: impl Fn(&T) -> usize,
     mut call: impl FnMut(&[T], bool) -> Result<Vec<R>>,
     mut give_up: impl FnMut(&T) -> R,
     mut on_done: impl FnMut(&[R], usize),
@@ -87,8 +100,16 @@ pub fn run_chunks<T, R>(
         hard_errors: 0,
         out: Vec::with_capacity(items.len()),
     };
-    for chunk in items.chunks(chunk_size.max(1)) {
-        run.solve(chunk)?;
+    let mut start = 0;
+    while start < items.len() {
+        let mut end = start + 1;
+        let mut used = weight(&items[start]);
+        while end < items.len() && used + weight(&items[end]) <= max_weight {
+            used += weight(&items[end]);
+            end += 1;
+        }
+        run.solve(&items[start..end])?;
+        start = end;
     }
     Ok(run.out)
 }
@@ -247,6 +268,24 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|(_, strict)| !strict));
         assert_eq!(done, [2, 4, 5]);
+    }
+
+    #[test]
+    fn weights_decide_what_shares_a_chunk() {
+        let mut calls: Vec<Vec<u32>> = Vec::new();
+        let result = run_weighted_chunks(
+            &[1, 2, 3, 9, 1, 1],
+            4,
+            |x: &u32| *x as usize,
+            |chunk: &[u32], _| {
+                calls.push(chunk.to_vec());
+                Ok(chunk.to_vec())
+            },
+            |_| 0,
+            |_, _| {},
+        );
+        assert_eq!(result.unwrap(), [1, 2, 3, 9, 1, 1]);
+        assert_eq!(calls, [vec![1, 2], vec![3], vec![9], vec![1, 1]]);
     }
 
     #[test]

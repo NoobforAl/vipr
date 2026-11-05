@@ -125,32 +125,40 @@ fn load_glossary_file(path: &Path) -> Result<Vec<String>> {
 }
 
 /// Input terms first, then the file's, without repeating a source. `source=target` in the file fixes
-/// a term's translation.
-fn merged_terms(input: &[GlossaryTerm], file: &[String]) -> Vec<GlossaryTerm> {
-    let from_file = file.iter().map(|line| match line.split_once('=') {
-        Some((source, target)) if !target.trim().is_empty() => GlossaryTerm {
-            source: source.trim().to_string(),
-            target: Some(target.trim().to_string()),
-        },
-        Some((source, _)) => GlossaryTerm {
-            source: source.trim().to_string(),
-            target: None,
-        },
-        None => GlossaryTerm {
-            source: line.clone(),
-            target: None,
-        },
-    });
-    let mut out: Vec<GlossaryTerm> = Vec::new();
-    for term in input.iter().cloned().chain(from_file) {
-        let is_new = !out
-            .iter()
-            .any(|t| t.source.to_lowercase() == term.source.to_lowercase());
-        if is_new && !term.source.trim().is_empty() {
-            out.push(term);
+/// a term's translation. The file's other lines become hints: it is a shared list made for speech
+/// recognition, with words such as "merge", so they aren't terms the user asked to keep as written.
+fn merged_terms(input: &[GlossaryTerm], file: &[String]) -> (Vec<GlossaryTerm>, Vec<String>) {
+    let mut terms: Vec<GlossaryTerm> = Vec::new();
+    let mut hints: Vec<String> = Vec::new();
+    let is_new = |source: &str, terms: &[GlossaryTerm], hints: &[String]| {
+        let source = source.to_lowercase();
+        !source.trim().is_empty()
+            && !terms.iter().any(|t| t.source.to_lowercase() == source)
+            && !hints.iter().any(|h| h.to_lowercase() == source)
+    };
+    for term in input {
+        if is_new(&term.source, &terms, &hints) {
+            terms.push(term.clone());
         }
     }
-    out
+    for line in file {
+        let (source, target) = match line.split_once('=') {
+            Some((source, target)) => (source.trim(), target.trim()),
+            None => (line.trim(), ""),
+        };
+        if !is_new(source, &terms, &hints) {
+            continue;
+        }
+        if target.is_empty() {
+            hints.push(source.to_string());
+        } else {
+            terms.push(GlossaryTerm {
+                source: source.to_string(),
+                target: Some(target.to_string()),
+            });
+        }
+    }
+    (terms, hints)
 }
 
 fn file_terms(args: &Args) -> Result<Vec<String>> {
@@ -192,7 +200,7 @@ fn run_translate(args: &Args) -> Result<()> {
     if input.cues.is_empty() {
         bail!("the input has no cues");
     }
-    input.glossary = merged_terms(&input.glossary, &file_terms(args)?);
+    (input.glossary, input.hints) = merged_terms(&input.glossary, &file_terms(args)?);
 
     let t = Instant::now();
     let backend = init_backend()?;
@@ -227,7 +235,7 @@ fn run_translate(args: &Args) -> Result<()> {
 fn run_compare(args: &Args) -> Result<()> {
     let started = Instant::now();
     let mut input: CompareInput = read_input(&args.input)?;
-    input.glossary = merged_terms(&input.glossary, &file_terms(args)?);
+    (input.glossary, input.hints) = merged_terms(&input.glossary, &file_terms(args)?);
 
     let output = if input.rows.is_empty() {
         // Every row of the table may already be settled, so there's no reason to load a model.
@@ -424,17 +432,26 @@ mod tests {
 
     #[test]
     fn file_terms_can_carry_a_target_and_input_terms_win() {
-        let input = [GlossaryTerm {
-            source: "API".into(),
-            target: Some("رابط".into()),
-        }];
+        let input = [
+            GlossaryTerm {
+                source: "API".into(),
+                target: Some("رابط".into()),
+            },
+            GlossaryTerm {
+                source: "Riz".into(),
+                target: None,
+            },
+        ];
         let file = [
             "api=other".to_string(),
             "deploy=استقرار".into(),
             "Cloudflare".into(),
+            "cloudflare".into(),
+            "riz".into(),
+            "merge=".into(),
             "=x".into(),
         ];
-        let terms = merged_terms(&input, &file);
+        let (terms, hints) = merged_terms(&input, &file);
         let plain: Vec<(&str, Option<&str>)> = terms
             .iter()
             .map(|t| (t.source.as_str(), t.target.as_deref()))
@@ -443,9 +460,14 @@ mod tests {
             plain,
             [
                 ("API", Some("رابط")),
+                ("Riz", None),
                 ("deploy", Some("استقرار")),
-                ("Cloudflare", None)
             ]
+        );
+        assert_eq!(
+            hints,
+            ["Cloudflare", "merge"],
+            "only the user's terms are kept"
         );
     }
 

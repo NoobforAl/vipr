@@ -175,6 +175,31 @@ mod tests {
     }
 
     #[test]
+    fn a_translated_cue_with_no_text_shows_nothing() {
+        let piece = |id, text: &str| TranslationCue {
+            id,
+            start: id as f64,
+            end: id as f64 + 1.0,
+            source: "source".to_string(),
+            text: text.to_string(),
+            status: CueStatus::Translated,
+            flags: vec![],
+        };
+        let file = TranslationFile {
+            version: 1,
+            target: "fa".to_string(),
+            source_hash: String::new(),
+            model: String::new(),
+            profile: None,
+            cues: vec![piece(1, ""), piece(2, "جالبه")],
+        };
+        let t = translation_track("fa", &file);
+        assert_eq!(t.cues.len(), 1);
+        assert_eq!(t.cue_at(1.5), None);
+        assert_eq!(t.cue_at(2.5).unwrap().id, 2);
+    }
+
+    #[test]
     fn translation_files_are_found_by_exact_stem() {
         let names = [
             "talk.fa.translation.json",

@@ -11,7 +11,7 @@ use engine::project::{
     VERSION,
 };
 use engine::sanitize::sanitize_untrusted;
-use engine::translate::{background, relevant_terms};
+use engine::translate::{background, relevant_hints, relevant_terms};
 
 use crate::batch::{self, BadReply};
 use crate::refine::Chat;
@@ -108,7 +108,8 @@ impl Driver<'_> {
         let text: Vec<String> = rows.iter().map(|r| format!("{} {}", r.a, r.b)).collect();
         let text = text.join("\n");
         let terms = relevant_terms(&self.input.glossary, &text);
-        let extra = background(self.input.profile_prompt.as_deref(), &terms);
+        let hints = relevant_hints(&self.input.hints, &text);
+        let extra = background(self.input.profile_prompt.as_deref(), &terms, &hints);
         let (mut system, user) = guards::build_prompt(rows, extra.as_deref());
         if strict {
             system.push_str(guards::STRICT_RULE);
@@ -187,6 +188,7 @@ mod tests {
             rows,
             profile_prompt: None,
             glossary: vec![],
+            hints: vec![],
         }
     }
 

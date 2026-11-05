@@ -700,11 +700,13 @@ fn txt_line(start: f64, text: &str) -> String {
     format!("[{}] {flat}\n", engine::transcript::clock(start))
 }
 
-/// A translation's cues as saved files show them. `[untranslated]` is added here and never stored.
+/// A translation's cues as saved files show them. `[untranslated]` is added here and never stored. A
+/// cue with no text is left out, as a blank subtitle block would break the file for some players.
 fn translated_cues(file: &TranslationFile) -> Vec<Cue> {
     let opts = SubtitleOptions::default();
     file.cues
         .iter()
+        .filter(|c| !cue_text(&c.text).is_empty())
         .map(|c| {
             let flat = cue_text(&c.text).replace('\n', " ");
             let text = match c.status {
@@ -1019,6 +1021,36 @@ mod tests {
             "[00:00:01] hallo\n[00:00:02] [untranslated] source\n[00:00:03] von Hand\n"
         );
         assert_eq!(file.cues[1].text, "source", "the marker is never stored");
+    }
+
+    #[test]
+    fn a_cue_with_no_text_never_reaches_the_saved_files() {
+        let dir = TestDir::new("empty-cue");
+        let paths = ProjectPaths::new(&dir.0, "a");
+        let file = translation(
+            "fa",
+            vec![
+                cue(1, "", CueStatus::Translated),
+                cue(2, "جالبه", CueStatus::Translated),
+                cue(3, " \n ", CueStatus::Edited),
+                cue(4, "بعدی", CueStatus::Translated),
+            ],
+        );
+        write_translated(&file, &paths).unwrap();
+        let srt = std::fs::read_to_string(paths.translated("fa", "srt")).unwrap();
+        assert_eq!(
+            srt,
+            "1\n00:00:02,000 --> 00:00:02,500\n\u{200f}جالبه\n\n\
+             2\n00:00:04,000 --> 00:00:04,500\n\u{200f}بعدی\n\n"
+        );
+        let parsed = engine::subparse::parse(&srt);
+        assert_eq!(parsed.cues.len(), 2, "{:?}", parsed.warnings);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let vtt = std::fs::read_to_string(paths.translated("fa", "vtt")).unwrap();
+        assert_eq!(vtt.matches("-->").count(), 2);
+        assert!(!vtt.contains("\n\n\n"), "{vtt:?}");
+        let txt = std::fs::read_to_string(paths.translated("fa", "txt")).unwrap();
+        assert_eq!(txt.lines().count(), 2, "{txt}");
     }
 
     #[test]

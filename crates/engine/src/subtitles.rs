@@ -113,7 +113,7 @@ fn timed_words(u: &Utterance) -> Vec<TimedWord> {
 
 /// True when a word ends a sentence, in the scripts that have their own full stop or question mark.
 /// `،` and `؛` are a comma and a semicolon, so they don't count.
-fn ends_sentence(s: &str) -> bool {
+pub(crate) fn ends_sentence(s: &str) -> bool {
     s.ends_with(['.', '?', '!', '。', '！', '？', '؟'])
 }
 

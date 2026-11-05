@@ -169,8 +169,9 @@ pub struct TranslationCue {
     pub end: f64,
     /// The text it was translated from.
     pub source: String,
-    /// The translation, or a copy of `source` when `status` is `Untranslated`. Never display
-    /// markers such as U+200F or `[untranslated]`: writers add those.
+    /// The translation, or a copy of `source` when `status` is `Untranslated`. Empty on a translated
+    /// cue when its sentence's translation had too few words to reach it, which leaves that text on a
+    /// neighbour. Never display markers such as U+200F or `[untranslated]`: writers add those.
     pub text: String,
     #[serde(default)]
     pub status: CueStatus,
@@ -396,9 +397,14 @@ pub struct TranslateInput {
     /// Added to the user message as background. Fixed guards still apply.
     #[serde(default)]
     pub profile_prompt: Option<String>,
-    /// Terms with a required translation. Mismatches are flags only.
+    /// The user's terms. One with a target must be translated that way, and one without stays exactly
+    /// as written. Mismatches are flags only.
     #[serde(default)]
     pub glossary: Vec<GlossaryTerm>,
+    /// Names and jargon from the shared glossary file, which also holds ordinary words such as "merge".
+    /// These only help the model and are never required.
+    #[serde(default)]
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -448,6 +454,9 @@ pub struct CompareInput {
     pub profile_prompt: Option<String>,
     #[serde(default)]
     pub glossary: Vec<GlossaryTerm>,
+    /// See [`TranslateInput::hints`].
+    #[serde(default)]
+    pub hints: Vec<String>,
 }
 
 /// One judged row. Choices name the real sides: the worker undoes its id-parity swap before writing.

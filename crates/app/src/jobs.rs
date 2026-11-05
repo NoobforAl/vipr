@@ -481,6 +481,7 @@ fn translate(
         cues: cues.clone(),
         profile_prompt: profile_prompt(profile),
         glossary: profile.map(|p| p.glossary.clone()).unwrap_or_default(),
+        hints: Vec::new(),
     };
     fsio::save_json(&input_path, &input).map_err(|e| e.to_string())?;
     let mut extra = glossary_args(glossary.as_deref());
@@ -532,8 +533,10 @@ fn profile_prompt(profile: Option<&Profile>) -> Option<String> {
 }
 
 /// Wraps the worker's output into the file saved on disk. Ids, times and source always come from `cues`.
-/// A cue with no usable translation holds its source and is `Untranslated`. A cue the user edited in
-/// `previous` is kept when it was made from the same source text.
+/// A cue with no usable translation holds its source and is `Untranslated`. Exactly empty is usable: the
+/// worker leaves a cue that way when its sentence had too few words to reach it. A cue the user edited
+/// in `previous` is kept when it was made from the same source text, while the rest of its sentence
+/// takes the new translation.
 fn translation_file(
     target: &str,
     cues: &[TimedText],
@@ -556,10 +559,10 @@ fn translation_file(
                     ..o.clone()
                 };
             }
-            let usable = done
-                .iter()
-                .find(|o| o.id == c.id)
-                .filter(|o| o.status == CueStatus::Translated && !o.text.trim().is_empty());
+            let usable = done.iter().find(|o| o.id == c.id).filter(|o| {
+                o.status == CueStatus::Translated
+                    && (o.text.is_empty() || !o.text.trim().is_empty())
+            });
             TranslationCue {
                 id: c.id,
                 start: c.start,
@@ -591,11 +594,12 @@ fn side_cues(paths: &ProjectPaths, side: &CompareSource) -> Result<(Vec<TimedTex
             check_name(lang)?;
             let file: TranslationFile = fsio::load_json(&paths.translation(lang))
                 .map_err(|e| load_error("the translation", e))?;
-            // an untranslated cue holds the source language, so this side has no text for it
+            // an untranslated cue holds the source language, so this side has no text for it, and an
+            // empty one has its text on a neighbour
             let cues = file
                 .cues
                 .into_iter()
-                .filter(|c| c.status != CueStatus::Untranslated)
+                .filter(|c| c.status != CueStatus::Untranslated && !c.text.trim().is_empty())
                 .map(|c| TimedText {
                     id: c.id,
                     start: c.start,
@@ -705,6 +709,7 @@ fn judge(
         rows,
         profile_prompt: profile_prompt(profile),
         glossary: profile.map(|p| p.glossary.clone()).unwrap_or_default(),
+        hints: Vec::new(),
     };
     fsio::save_json(&input_path, &input).map_err(|e| e.to_string())?;
     call_worker(
@@ -1099,11 +1104,63 @@ mod tests {
         assert_eq!(file.cues[0].source, "one");
         assert_eq!(file.cues[0].start, 1.0);
         assert_eq!(file.cues[0].flags, [CueFlag::NumberMismatch]);
+        // only blanks are a failure here: "" is how the worker leaves a cue with no words of its own
         for (cue, source) in file.cues[1..].iter().zip(["two", "three", "four"]) {
             assert_eq!(cue.status, CueStatus::Untranslated);
             assert_eq!(cue.text, source, "holds its source");
             assert!(cue.flags.is_empty());
         }
+    }
+
+    #[test]
+    fn a_cue_left_empty_by_its_sentence_stays_empty() {
+        let cues = [timed(1, "That's"), timed(2, "interesting.")];
+        let file = translation_file(
+            "de",
+            &cues,
+            output(vec![
+                out_cue(1, "", CueStatus::Translated),
+                out_cue(2, "Interessant.", CueStatus::Translated),
+            ]),
+            "m".into(),
+            None,
+            None,
+        );
+        assert_eq!(file.cues[0].text, "");
+        assert_eq!(file.cues[0].status, CueStatus::Translated);
+        assert_eq!(file.cues[0].source, "That's");
+        assert_eq!(file.cues[1].text, "Interessant.");
+    }
+
+    #[test]
+    fn an_edit_stays_when_the_rest_of_its_sentence_is_translated_again() {
+        let previous = TranslationFile {
+            version: 1,
+            target: "de".into(),
+            source_hash: String::new(),
+            model: String::new(),
+            profile: None,
+            cues: vec![TranslationCue {
+                source: "first half".into(),
+                ..out_cue(1, "von Hand", CueStatus::Edited)
+            }],
+        };
+        let cues = [timed(1, "first half"), timed(2, "second half.")];
+        let file = translation_file(
+            "de",
+            &cues,
+            output(vec![
+                out_cue(1, "erste", CueStatus::Translated),
+                out_cue(2, "zweite Hälfte.", CueStatus::Translated),
+            ]),
+            "m".into(),
+            None,
+            Some(&previous),
+        );
+        assert_eq!(file.cues[0].text, "von Hand");
+        assert_eq!(file.cues[0].status, CueStatus::Edited);
+        assert_eq!(file.cues[1].text, "zweite Hälfte.");
+        assert_eq!(file.cues[1].status, CueStatus::Translated);
     }
 
     #[test]
@@ -1172,6 +1229,7 @@ mod tests {
                 out_cue(1, "eins", CueStatus::Translated),
                 out_cue(2, "two", CueStatus::Untranslated),
                 out_cue(3, "drei", CueStatus::Edited),
+                out_cue(4, "", CueStatus::Translated),
             ],
         };
         fsio::save_json(&paths.translation("de"), &file).unwrap();
