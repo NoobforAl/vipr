@@ -122,6 +122,50 @@ impl Track {
     }
 }
 
+/// The label of the transcript's own track.
+const ORIGINAL: &str = "Original";
+
+/// Each utterance's share of a track, joined into one text. A cue belongs to the last utterance that started by then. An
+/// utterance no cue reached gets an empty text. `starts` must be sorted, as a transcript's are.
+fn texts_per_utterance(starts: &[f64], cues: &[SubCue]) -> Vec<String> {
+    let mut texts = vec![String::new(); starts.len()];
+    for cue in cues {
+        let at = starts
+            .partition_point(|s| *s <= cue.start)
+            .saturating_sub(1);
+        if let Some(text) = texts.get_mut(at) {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&cue.text.replace('\n', " "));
+        }
+    }
+    texts
+}
+
+/// One saved translation, ready to show next to a transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranslatedLines {
+    /// The language's name.
+    pub label: String,
+    /// Safe for a widget. One for each utterance of the transcript.
+    pub texts: Vec<String>,
+}
+
+/// All saved translations of a result, for a transcript whose utterances start at `starts`. Touches the disk, so call it
+/// off the UI thread.
+pub fn translated_lines(paths: &ProjectPaths, starts: &[f64]) -> Vec<TranslatedLines> {
+    load_tracks(paths)
+        .tracks
+        .into_iter()
+        .filter(|track| track.label != ORIGINAL)
+        .map(|track| TranslatedLines {
+            texts: texts_per_utterance(starts, &track.cues),
+            label: track.label,
+        })
+        .collect()
+}
+
 fn original_track(t: &Transcript) -> Track {
     let mut diffs: HashMap<usize, Arc<AiDiff>> = HashMap::new();
     if t.refined {
@@ -147,7 +191,7 @@ fn original_track(t: &Transcript) -> Track {
             cue
         })
         .collect();
-    Track::new("Original".to_string(), cues)
+    Track::new(ORIGINAL.to_string(), cues)
 }
 
 fn translation_track(lang: &str, file: &TranslationFile) -> Track {
@@ -360,6 +404,58 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(broken.chapters.is_empty());
         assert_eq!(broken.problems.len(), 1);
+    }
+
+    #[test]
+    fn a_translation_is_shared_out_to_the_utterances_by_time() {
+        let cues = [
+            cue(1, 5.0, 6.0, "eins"),
+            cue(2, 7.0, 8.0, "zwei\ndrei"),
+            cue(3, 20.0, 21.0, "vier"),
+        ];
+        // nothing reaches the utterance at 10 s, and a cue before the first start joins the first
+        assert_eq!(
+            texts_per_utterance(&[5.0, 10.0, 15.0], &cues),
+            ["eins zwei drei", "", "vier"]
+        );
+        assert_eq!(
+            texts_per_utterance(&[6.0], &[cue(1, 5.0, 5.5, "früh")]),
+            ["früh"]
+        );
+        assert_eq!(texts_per_utterance(&[], &cues), Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_translations_are_offered_with_the_lines_of_each() {
+        let dir = std::env::temp_dir().join(format!("vipr-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = ProjectPaths::new(&dir, "clip");
+        transcript(true, vec![utterance(1, 0.0, "hello", "hello")])
+            .save(&paths.transcript())
+            .unwrap();
+        let file = TranslationFile {
+            version: 1,
+            target: "fa".to_string(),
+            source_hash: String::new(),
+            model: String::new(),
+            profile: None,
+            cues: vec![TranslationCue {
+                id: 1,
+                start: 0.0,
+                end: 1.0,
+                source: "hello".to_string(),
+                text: "سلام".to_string(),
+                status: CueStatus::Translated,
+                flags: vec![],
+            }],
+        };
+        engine::fsio::save_json(&paths.translation("fa"), &file).unwrap();
+
+        let lines = translated_lines(&paths, &[0.0]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].label, "Persian");
+        assert_eq!(lines[0].texts, ["سلام"]);
     }
 
     #[test]

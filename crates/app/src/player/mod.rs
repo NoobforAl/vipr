@@ -35,7 +35,7 @@ use crate::theme::{self, Tokens};
 
 use probe::Probe;
 use session::{Config, Session, Shared};
-pub use subs::{AiDiff, SubCue};
+pub use subs::{AiDiff, SubCue, TranslatedLines, translated_lines};
 use subs::{Track, TrackSet, load_tracks};
 
 const NUDGE_SECS: f64 = 5.0;

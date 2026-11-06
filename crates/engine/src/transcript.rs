@@ -363,14 +363,24 @@ impl Transcript {
 
     /// Plain text: `[HH:MM:SS] Name: text`, one line per utterance (same layout as the Python pipeline).
     pub fn to_txt(&self) -> String {
+        let texts: Vec<&str> = self.utterances.iter().map(|u| u.text.as_str()).collect();
+        self.to_txt_with(&texts)
+    }
+
+    /// [`Transcript::to_txt`] with other text for each utterance, such as a translation. Utterances without any are left
+    /// out.
+    pub fn to_txt_with<S: AsRef<str>>(&self, texts: &[S]) -> String {
         let mut out = String::new();
-        for u in &self.utterances {
-            out.push_str(&format!(
-                "[{}] {}: {}\n",
-                clock(u.start),
-                self.speaker_name(u.speaker),
-                u.text
-            ));
+        for (u, text) in self.utterances.iter().zip(texts) {
+            let text = text.as_ref();
+            if !text.is_empty() {
+                out.push_str(&format!(
+                    "[{}] {}: {}\n",
+                    clock(u.start),
+                    self.speaker_name(u.speaker),
+                    text
+                ));
+            }
         }
         out
     }

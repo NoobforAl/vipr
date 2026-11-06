@@ -81,6 +81,7 @@ pub enum RunEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finished {
     Translated {
+        job: u64,
         target: String,
         translated: usize,
         untranslated: usize,
@@ -230,10 +231,11 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             translated,
             untranslated,
             flagged,
+            ..
         } => {
             let mut notice = format!(
-                "Translated {translated} lines to {name}. To see them, open the player and choose {name}.",
-                name = language_name(&target)
+                "Translated {translated} lines to {}.",
+                language_name(&target)
             );
             if untranslated > 0 {
                 notice.push_str(&format!(
@@ -339,7 +341,7 @@ pub fn view(state: &State, t: Tokens, clock: f32) -> Element<'_, Msg> {
         .into()
 }
 
-fn language_name(code: &str) -> String {
+pub fn language_name(code: &str) -> String {
     engine::lang::language(code).map_or_else(|| code.to_string(), |l| l.name.to_string())
 }
 
@@ -631,6 +633,7 @@ fn translate(
 
     let count = |status: CueStatus| file.cues.iter().filter(|c| c.status == status).count();
     Ok(Finished::Translated {
+        job: run.job.id,
         target: target.to_string(),
         translated: count(CueStatus::Translated) + count(CueStatus::Edited),
         untranslated: count(CueStatus::Untranslated),

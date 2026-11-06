@@ -341,6 +341,11 @@ impl fmt::Display for LanguageChoice {
     }
 }
 
+/// A row's selectable text. Text comes in cleaned for a widget or is cleaned here, so it can't break the layout.
+fn row_content(line: &str) -> text_editor::Content {
+    text_editor::Content::with_text(&clean_separators(line))
+}
+
 /// The languages a transcript can be translated to. Not its own: that would fail in the worker.
 fn translate_options(source: Option<&str>) -> Vec<LanguageChoice> {
     LANGUAGES
@@ -403,6 +408,14 @@ enum Message {
     TranslateTarget(LanguageChoice),
     /// The translate box lost focus: whatever was typed there is dropped.
     TranslateBoxClosed,
+    /// A job's saved translations were read, and which of them to show, by name.
+    TranslationsLoaded {
+        job: u64,
+        translations: Vec<player::TranslatedLines>,
+        show: Option<String>,
+    },
+    /// Show this translation on the transcript page. `None` is the original text.
+    ViewLanguage(Option<usize>),
     Translate(u64),
     // saved results
     OpenResult {
@@ -491,6 +504,10 @@ struct App {
     reviewable: HashSet<u64>,
     /// The language picked for "Translate" on the result page.
     translate_target: Option<LanguageChoice>,
+    /// The saved translations of the transcript page's job.
+    translations: Vec<player::TranslatedLines>,
+    /// The one of `translations` the page shows. `None` is the original text.
+    viewing: Option<usize>,
     /// What the translate box searches, and the transcript language it was made for. See [`App::sync_translate_box`].
     translate_box: combo_box::State<LanguageChoice>,
     translate_box_source: Option<Option<&'static str>>,
@@ -566,6 +583,8 @@ impl App {
             review_ready: None,
             reviewable: HashSet::new(),
             translate_target: None,
+            translations: Vec::new(),
+            viewing: None,
             translate_box: combo_box::State::default(),
             translate_box_source: None,
             auto_open: false,
@@ -1424,19 +1443,39 @@ impl App {
                         .iter()
                         .map(|s| clean_separators(&s.name))
                         .collect();
-                    let rows: Vec<text_editor::Content> = t
-                        .utterances
-                        .iter()
-                        .take(PAGE)
-                        .map(|u| text_editor::Content::with_text(&clean_separators(&u.text)))
-                        .collect();
                     self.name_edits = names;
-                    self.rows = rows;
                     self.copied = None;
                     self.shown = PAGE;
                     self.page = Page::Transcript(id);
                     self.auto_open = false;
+                    self.translations.clear();
+                    self.viewing = None;
+                    self.rebuild_rows(id);
                     self.note_review_files(id);
+                    return self.load_translations(id, None);
+                }
+                Task::none()
+            }
+            Message::TranslationsLoaded {
+                job,
+                translations,
+                show,
+            } => {
+                // from before the user moved on
+                if self.page == Page::Transcript(job) {
+                    let shown_now = self.viewing_label().map(str::to_string);
+                    let wanted = show.or(shown_now);
+                    self.viewing =
+                        wanted.and_then(|w| translations.iter().position(|l| l.label == w));
+                    self.translations = translations;
+                    self.rebuild_rows(job);
+                }
+                Task::none()
+            }
+            Message::ViewLanguage(index) => {
+                self.viewing = index.filter(|i| *i < self.translations.len());
+                if let Page::Transcript(id) = self.page {
+                    self.rebuild_rows(id);
                 }
                 Task::none()
             }
@@ -1530,13 +1569,8 @@ impl App {
                         .job(id)
                         .and_then(|j| j.transcript.as_ref())
                         .map(|t| {
-                            t.utterances
-                                .iter()
-                                .skip(have)
-                                .take(self.shown.saturating_sub(have))
-                                .map(|u| {
-                                    text_editor::Content::with_text(&clean_separators(&u.text))
-                                })
+                            (have..t.utterances.len().min(self.shown))
+                                .map(|i| row_content(&self.row_text(t, i)))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -1558,8 +1592,8 @@ impl App {
                     Page::Transcript(id) => self
                         .job(id)
                         .and_then(|j| j.transcript.as_ref())
-                        .and_then(|t| t.utterances.get(i))
-                        .map(|u| u.text.clone()),
+                        .filter(|t| i < t.utterances.len())
+                        .map(|t| self.row_text(t, i)),
                     Page::Home | Page::Player(_) | Page::Review(_) => None,
                 };
                 match text {
@@ -1576,17 +1610,20 @@ impl App {
                 }
                 Task::none()
             }
-            Message::CopyText(id) => match self
-                .job(id)
-                .and_then(|j| j.transcript.as_ref())
-                .map(|t| t.to_txt())
-            {
-                Some(text) => {
-                    self.copied = Some((CopyTarget::All, Instant::now()));
-                    iced::clipboard::write(text)
+            Message::CopyText(id) => {
+                match self.job(id).and_then(|j| j.transcript.as_ref()).map(|t| {
+                    match self.viewed_texts() {
+                        Some(texts) => t.to_txt_with(texts),
+                        None => t.to_txt(),
+                    }
+                }) {
+                    Some(text) => {
+                        self.copied = Some((CopyTarget::All, Instant::now()));
+                        iced::clipboard::write(text)
+                    }
+                    None => Task::none(),
                 }
-                None => Task::none(),
-            },
+            }
             Message::RenameSpeaker(i, v) => {
                 if i < self.name_edits.len() {
                     self.name_edits[i] = clean_separators(&v);
@@ -1748,6 +1785,11 @@ impl App {
                     self.reviewable.insert(job);
                 }
                 let reload = match finished {
+                    Some(jobs::Finished::Translated { job, target, .. })
+                        if self.page == Page::Transcript(job) =>
+                    {
+                        self.load_translations(job, Some(jobs::language_name(&target)))
+                    }
                     Some(jobs::Finished::Translated { .. } | jobs::Finished::Chapters { .. })
                         if matches!(self.page, Page::Player(_)) =>
                     {
@@ -1770,6 +1812,65 @@ impl App {
         }
         self.sync_translate_box();
         task
+    }
+
+    /// The translation on show, one text per utterance. `None` when the page shows the original.
+    fn viewed_texts(&self) -> Option<&[String]> {
+        self.viewing
+            .and_then(|i| self.translations.get(i))
+            .map(|l| l.texts.as_slice())
+    }
+
+    fn viewing_label(&self) -> Option<&str> {
+        self.viewing
+            .and_then(|i| self.translations.get(i))
+            .map(|l| l.label.as_str())
+    }
+
+    /// What utterance `i` says in the language on show.
+    fn row_text(&self, t: &Transcript, i: usize) -> String {
+        match self.viewed_texts() {
+            Some(texts) => texts.get(i).cloned().unwrap_or_default(),
+            None => t
+                .utterances
+                .get(i)
+                .map(|u| u.text.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The selectable text of the rows built so far, in the language on show.
+    fn rebuild_rows(&mut self, id: u64) {
+        let rows = self
+            .job(id)
+            .and_then(|j| j.transcript.as_ref())
+            .map(|t| {
+                (0..t.utterances.len().min(self.shown))
+                    .map(|i| row_content(&self.row_text(t, i)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.rows = rows;
+    }
+
+    /// Reads a job's saved translations off the UI thread, then shows the one called `show`, if any.
+    fn load_translations(&self, job: u64, show: Option<String>) -> Task<Message> {
+        let found = self.job(job).and_then(|j| {
+            let paths = j.paths.clone()?;
+            let starts = j.transcript.as_ref()?.utterances.iter().map(|u| u.start);
+            Some((paths, starts.collect::<Vec<f64>>()))
+        });
+        let Some((paths, starts)) = found else {
+            return Task::none();
+        };
+        Task::perform(
+            import_ui::on_thread(move || Ok(player::translated_lines(&paths, &starts))),
+            move |translations| Message::TranslationsLoaded {
+                job,
+                translations: translations.unwrap_or_default(),
+                show: show.clone(),
+            },
+        )
     }
 
     /// The box keeps its own list, so it is rebuilt when the open transcript has another language.
@@ -3040,6 +3141,7 @@ impl App {
                 column![
                     header,
                     self.result_actions(id, tr),
+                    self.language_switch(),
                     legend,
                     jobs::view(&self.queue, t, self.epoch.elapsed().as_secs_f32())
                         .map(Message::Jobs)
@@ -3054,6 +3156,34 @@ impl App {
                 .height(Length::Fill),
         ]
         .into()
+    }
+
+    /// Original and each saved translation, to choose what the page below shows. Nothing without a translation.
+    fn language_switch(&self) -> Element<'_, Message> {
+        if self.translations.is_empty() {
+            return space().into();
+        }
+        let t = self.tokens;
+        let choice = |label: &str, index: Option<usize>| -> Element<'_, Message> {
+            button(text(label.to_string()).size(13))
+                .padding([5, 12])
+                .style(theme::segment(t, self.viewing == index))
+                .on_press(Message::ViewLanguage(index))
+                .into()
+        };
+        let mut items = vec![
+            text("Showing").size(12).color(t.muted).into(),
+            choice("Original", None),
+        ];
+        for (i, language) in self.translations.iter().enumerate() {
+            items.push(choice(language.label.as_str(), Some(i)));
+        }
+        row(items)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap()
+            .vertical_spacing(8)
+            .into()
     }
 
     /// What can be done with a finished result: translate it, import subtitles, review a comparison.
