@@ -75,14 +75,7 @@ pub fn find_worker(name: &str) -> Option<PathBuf> {
     };
     let exe = std::env::current_exe().ok()?;
     for dir in exe.parent()?.ancestors() {
-        for rel in [
-            "",
-            "workers",
-            "release",
-            "target/release",
-            "target-diar/release",
-            "target-llm/release",
-        ] {
+        for rel in ["", "workers", "release", "target/release"] {
             let p = if rel.is_empty() {
                 dir.join(&file)
             } else {

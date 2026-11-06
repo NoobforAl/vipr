@@ -36,12 +36,9 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'build failed (asr-worker / llm-worker)' }
 }
 
-# Find each executable in the usual build folders (agents / developers may use separate target dirs).
 function Find-Exe([string]$name) {
-    foreach ($dir in 'target', 'target-diar', 'target-llm') {
-        $p = Join-Path $root "$dir\release\$name.exe"
-        if (Test-Path $p) { return $p }
-    }
+    $p = Join-Path $root "target\release\$name.exe"
+    if (Test-Path $p) { return $p }
     return $null
 }
 
