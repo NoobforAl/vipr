@@ -61,7 +61,7 @@ pub fn bar<'a, M: 'a>(fraction: f32, clock: f32, height: f32, t: Tokens) -> Elem
             container(space())
                 .width(Length::FillPortion(filled))
                 .height(height)
-                .style(theme::rounded_fill(t.accent, radius)),
+                .style(theme::rounded_fill(t.accent_fill, radius)),
         );
     }
     if open > 0 {
@@ -73,7 +73,7 @@ pub fn bar<'a, M: 'a>(fraction: f32, clock: f32, height: f32, t: Tokens) -> Elem
                     .width(Length::FillPortion(size))
                     .height(height)
                     .style(theme::rounded_fill(
-                        theme::with_alpha(t.accent, 0.38),
+                        theme::with_alpha(t.accent, 0.3),
                         radius,
                     )),
             );

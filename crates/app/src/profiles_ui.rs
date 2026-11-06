@@ -465,7 +465,7 @@ fn editor_style(t: Tokens) -> impl Fn(&Theme, text_editor::Status) -> text_edito
             _ => t.rule,
         };
         text_editor::Style {
-            background: Background::Color(t.bg),
+            background: Background::Color(t.well),
             border: Border {
                 color,
                 width: 1.0,
@@ -473,7 +473,7 @@ fn editor_style(t: Tokens) -> impl Fn(&Theme, text_editor::Status) -> text_edito
             },
             placeholder: t.faint,
             value: t.text,
-            selection: theme::with_alpha(t.accent, 0.35),
+            selection: theme::with_alpha(t.accent_fill, 0.55),
         }
     }
 }

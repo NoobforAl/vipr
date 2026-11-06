@@ -2716,7 +2716,7 @@ impl App {
                 )
                 .center_x(Length::Fixed(22.0))
                 .center_y(Length::Fixed(22.0))
-                .style(theme::disc(t.accent))
+                .style(theme::disc(t.accent_fill))
                 .into()
             } else {
                 container(text((i + 1).to_string()).size(12).color(t.faint))

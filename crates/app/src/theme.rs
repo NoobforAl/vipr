@@ -1,5 +1,5 @@
-//! Design tokens and widget styles. The palette and radii follow the ddIRC app: calm layered
-//! surfaces, one soft accent, hairline borders, generous radii, no shadows or ripples.
+//! Design tokens and widget styles. The look follows Adobe Premiere Pro: flat neutral grey panels, black gaps between
+//! them, tight corners and one strong blue.
 
 use iced::theme::Palette;
 use iced::widget::{
@@ -13,11 +13,19 @@ pub struct Tokens {
     pub bg: Color,
     pub surface: Color,
     pub hover: Color,
+    /// Hairlines and tracks.
     pub rule: Color,
+    /// The gap between panels.
+    pub gutter: Color,
+    /// Where something is typed, darker than the panel around it.
+    pub well: Color,
     pub text: Color,
     pub muted: Color,
     pub faint: Color,
+    /// Blue for text and icons on a panel.
     pub accent: Color,
+    /// Blue to fill something with. Darker than `accent`, so `on_accent` reads on it.
+    pub accent_fill: Color,
     pub on_accent: Color,
     pub ok: Color,
     pub warn: Color,
@@ -29,33 +37,43 @@ const fn hex(v: u32) -> Color {
     Color::from_rgb8((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
+/// Measured from Adobe Premiere Pro's own window: its panels, black gaps, wells, control grey, text and two blues. Two
+/// values differ on purpose: `faint` is lighter than Premiere's 0x616161, which is too dim for small text, and `bubble`
+/// is ours, since Premiere has no cards to take it from.
 pub const DARK: Tokens = Tokens {
     dark: true,
-    bg: hex(0x15171C),
-    surface: hex(0x1B1E24),
-    hover: hex(0x242832),
-    rule: hex(0x2E323C),
-    text: hex(0xE8E9EE),
-    muted: hex(0x9DA1AD),
-    faint: hex(0x626773),
-    accent: hex(0x8AB4F8),
-    on_accent: hex(0x15171C),
+    bg: hex(0x1D1D1D),
+    surface: hex(0x1D1D1D),
+    hover: hex(0x303030),
+    rule: hex(0x303030),
+    gutter: hex(0x000000),
+    well: hex(0x0E0E0E),
+    text: hex(0xD0D0D0),
+    muted: hex(0xB0B0B0),
+    faint: hex(0x8A8A8A),
+    accent: hex(0x4096F3),
+    accent_fill: hex(0x066CE7),
+    on_accent: hex(0xFFFFFF),
     ok: hex(0x7BCF95),
     warn: hex(0xE2BA55),
     bad: hex(0xE57A7A),
-    bubble: hex(0x20242C),
+    bubble: hex(0x252525),
 };
 
+/// The same neutral greys and blue, for a light window.
 pub const LIGHT: Tokens = Tokens {
     dark: false,
-    bg: hex(0xF6F5F2),
-    surface: hex(0xEFEEEA),
-    hover: hex(0xE6E4DF),
-    rule: hex(0xDAD8D2),
-    text: hex(0x1E1F24),
-    muted: hex(0x5F616B),
-    faint: hex(0x85878F),
-    accent: hex(0x3563C0),
+    bg: hex(0xF5F5F5),
+    surface: hex(0xEDEDED),
+    hover: hex(0xE1E1E1),
+    rule: hex(0xD4D4D4),
+    gutter: hex(0xC4C4C4),
+    well: hex(0xFFFFFF),
+    text: hex(0x1F1F1F),
+    muted: hex(0x505050),
+    faint: hex(0x6B6B6B),
+    accent: hex(0x0A5BC2),
+    accent_fill: hex(0x066CE7),
     on_accent: hex(0xFFFFFF),
     ok: hex(0x19703B),
     warn: hex(0x845D00),
@@ -63,27 +81,12 @@ pub const LIGHT: Tokens = Tokens {
     bubble: hex(0xFFFFFF),
 };
 
-/// The player page in any app theme: the dark, flat look of a classic desktop media player.
-pub const PLAYER: Tokens = Tokens {
-    dark: true,
-    bg: hex(0x1F1F1F),
-    surface: hex(0x2B2B2B),
-    hover: hex(0x3A3A3A),
-    rule: hex(0x3F3F3F),
-    text: hex(0xE6E6E6),
-    muted: hex(0xA8A8A8),
-    faint: hex(0x707070),
-    accent: hex(0x2F9BE0),
-    on_accent: hex(0xFFFFFF),
-    ok: hex(0x7BCF95),
-    warn: hex(0xE2BA55),
-    bad: hex(0xE57A7A),
-    bubble: hex(0x262626),
-};
+/// The player page in any app theme: dark, as an editor's panels are.
+pub const PLAYER: Tokens = DARK;
 
-pub const RADIUS_S: f32 = 10.0;
-pub const RADIUS_M: f32 = 14.0;
-pub const RADIUS_L: f32 = 18.0;
+pub const RADIUS_S: f32 = 4.0;
+pub const RADIUS_M: f32 = 6.0;
+pub const RADIUS_L: f32 = 8.0;
 pub const PILL: f32 = 999.0;
 
 impl Tokens {
@@ -163,7 +166,7 @@ pub fn panel(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(t.surface)),
         border: Border {
-            color: t.rule,
+            color: t.gutter,
             width: 1.0,
             radius: border::radius(0),
         },
@@ -258,17 +261,17 @@ pub fn primary(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
                 background: Some(Background::Color(t.hover)),
                 text_color: t.faint,
                 border: Border {
-                    radius: border::radius(RADIUS_S),
+                    radius: border::radius(PILL),
                     ..Default::default()
                 },
                 ..Default::default()
             };
         }
         button::Style {
-            background: Some(Background::Color(press_dim(t.accent, status, t))),
+            background: Some(Background::Color(press_dim(t.accent_fill, status, t))),
             text_color: t.on_accent,
             border: Border {
-                radius: border::radius(RADIUS_S),
+                radius: border::radius(PILL),
                 ..Default::default()
             },
             ..Default::default()
@@ -319,16 +322,11 @@ pub fn ghost(t: Tokens) -> impl Fn(&Theme, button::Status) -> button::Style {
 /// Sidebar item; `active` shows the accent tint.
 pub fn nav_item(t: Tokens, active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
-        let bg = if active {
-            Some(Background::Color(with_alpha(t.accent, 0.16)))
-        } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-            Some(Background::Color(t.hover))
-        } else {
-            None
-        };
+        let raised = active || matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let bg = raised.then_some(Background::Color(t.hover));
         button::Style {
             background: bg,
-            text_color: if active { t.accent } else { t.text },
+            text_color: if active { t.text } else { t.muted },
             border: Border {
                 radius: border::radius(RADIUS_S),
                 ..Default::default()
@@ -344,21 +342,14 @@ pub fn segment(t: Tokens, selected: bool) -> impl Fn(&Theme, button::Status) -> 
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         button::Style {
             background: Some(Background::Color(if selected {
-                with_alpha(t.accent, 0.18)
+                t.accent_fill
             } else if hovered {
                 t.hover
             } else {
                 Color::TRANSPARENT
             })),
-            text_color: if selected { t.accent } else { t.muted },
-            border: outline(
-                if selected {
-                    with_alpha(t.accent, 0.5)
-                } else {
-                    t.rule
-                },
-                RADIUS_S,
-            ),
+            text_color: if selected { t.on_accent } else { t.muted },
+            border: outline(if selected { t.accent_fill } else { t.rule }, RADIUS_S),
             ..Default::default()
         }
     }
@@ -371,7 +362,7 @@ pub fn flat(t: Tokens, selected: bool) -> impl Fn(&Theme, button::Status) -> but
     move |_, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         let background = if selected {
-            Some(Background::Color(with_alpha(t.accent, 0.28)))
+            Some(Background::Color(with_alpha(t.accent_fill, 0.55)))
         } else if hovered {
             Some(Background::Color(t.hover))
         } else {
@@ -409,7 +400,10 @@ pub fn flat_card(t: Tokens) -> impl Fn(&Theme) -> container::Style {
 /// The subtitle line on screen in the timeline.
 pub fn current_line(t: Tokens, strength: f32) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: Some(Background::Color(with_alpha(t.accent, 0.22 * strength))),
+        background: Some(Background::Color(with_alpha(
+            t.accent_fill,
+            0.34 * strength,
+        ))),
         border: Border {
             radius: border::radius(2),
             ..Default::default()
@@ -463,8 +457,8 @@ pub fn seek_slider(t: Tokens, height: f32) -> impl Fn(&Theme, slider::Status) ->
 
 pub fn volume_slider(t: Tokens, height: f32) -> impl Fn(&Theme, slider::Status) -> slider::Style {
     bar_slider(
-        with_alpha(t.accent, 0.45),
-        t.bg,
+        with_alpha(t.accent_fill, 0.7),
+        t.well,
         t.rule,
         t.accent,
         2,
@@ -505,12 +499,12 @@ pub fn input(t: Tokens) -> impl Fn(&Theme, text_input::Status) -> text_input::St
             _ => t.rule,
         };
         text_input::Style {
-            background: Background::Color(t.bg),
+            background: Background::Color(t.well),
             border: outline(border_color, RADIUS_S),
             icon: t.muted,
             placeholder: t.faint,
             value: t.text,
-            selection: with_alpha(t.accent, 0.35),
+            selection: with_alpha(t.accent_fill, 0.55),
         }
     }
 }
@@ -526,7 +520,7 @@ pub fn pick(t: Tokens) -> impl Fn(&Theme, pick_list::Status) -> pick_list::Style
             text_color: t.text,
             placeholder_color: t.faint,
             handle_color: t.muted,
-            background: Background::Color(t.bg),
+            background: Background::Color(t.well),
             border: outline(border_color, RADIUS_S),
         }
     }
@@ -539,7 +533,7 @@ pub fn search_menu(t: Tokens) -> impl Fn(&Theme) -> iced::overlay::menu::Style {
         border: outline(t.rule, RADIUS_S),
         text_color: t.text,
         selected_text_color: t.on_accent,
-        selected_background: Background::Color(t.accent),
+        selected_background: Background::Color(t.accent_fill),
         shadow: Default::default(),
     }
 }
@@ -571,7 +565,7 @@ pub fn bar_tint(t: Tokens, color: Color) -> impl Fn(&Theme) -> progress_bar::Sty
 pub fn bar(t: Tokens) -> impl Fn(&Theme) -> progress_bar::Style {
     move |_| progress_bar::Style {
         background: Background::Color(t.rule),
-        bar: Background::Color(t.accent),
+        bar: Background::Color(t.accent_fill),
         border: Border {
             radius: border::radius(PILL),
             ..Default::default()
@@ -605,7 +599,7 @@ pub fn sidebar(t: Tokens, round_bottom_left: bool) -> impl Fn(&Theme) -> contain
 
 pub fn divider(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: Some(Background::Color(t.rule)),
+        background: Some(Background::Color(t.gutter)),
         ..Default::default()
     }
 }
@@ -621,7 +615,7 @@ pub fn window_frame(
         background: Some(Background::Color(t.bg)),
         border: Border {
             color: if draw_border {
-                t.rule
+                t.gutter
             } else {
                 Color::TRANSPARENT
             },
@@ -663,6 +657,54 @@ pub fn selectable(t: Tokens) -> impl Fn(&Theme, text_editor::Status) -> text_edi
         },
         placeholder: t.faint,
         value: t.text,
-        selection: with_alpha(t.accent, 0.38),
+        selection: with_alpha(t.accent_fill, 0.55),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: Color) -> f32 {
+        let linear = |v: f32| {
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// 4.5 is the WCAG AA bar for small text, and most text in this app is small.
+    #[test]
+    fn every_kind_of_text_stays_readable_in_every_theme() {
+        for (name, t) in [("dark", DARK), ("light", LIGHT), ("player", PLAYER)] {
+            for (what, fg, bg) in [
+                ("text on bg", t.text, t.bg),
+                ("text on surface", t.text, t.surface),
+                ("text on bubble", t.text, t.bubble),
+                ("text on hover", t.text, t.hover),
+                ("text in a well", t.text, t.well),
+                ("muted on bg", t.muted, t.bg),
+                ("muted on bubble", t.muted, t.bubble),
+                ("faint on bg", t.faint, t.bg),
+                ("faint on surface", t.faint, t.surface),
+                ("accent on bg", t.accent, t.bg),
+                ("accent on surface", t.accent, t.surface),
+                ("button text on its fill", t.on_accent, t.accent_fill),
+                ("ok on bg", t.ok, t.bg),
+                ("warn on bg", t.warn, t.bg),
+                ("bad on bg", t.bad, t.bg),
+            ] {
+                let ratio = contrast(fg, bg);
+                assert!(ratio >= 4.5, "{name}: {what} is only {ratio:.2}");
+            }
+        }
     }
 }
