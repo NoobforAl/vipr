@@ -137,7 +137,9 @@ fn texts_per_utterance(starts: &[f64], cues: &[SubCue]) -> Vec<String> {
             if !text.is_empty() {
                 text.push(' ');
             }
-            text.push_str(&cue.text.replace('\n', " "));
+            let flat = cue.text.replace('\n', " ");
+            // the mark a subtitle uses for a new speaker: here each speaker already has a row
+            text.push_str(flat.strip_prefix("- ").unwrap_or(&flat));
         }
     }
     texts
@@ -423,6 +425,12 @@ mod tests {
             ["früh"]
         );
         assert_eq!(texts_per_utterance(&[], &cues), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_subtitle_mark_for_a_new_speaker_is_left_out() {
+        let cues = [cue(1, 0.0, 1.0, "- بله."), cue(2, 1.0, 2.0, "a - b")];
+        assert_eq!(texts_per_utterance(&[0.0], &cues), ["بله. a - b"]);
     }
 
     #[test]
