@@ -73,6 +73,10 @@ impl ProjectPaths {
     pub fn checkpoint(&self, lang: &str) -> PathBuf {
         self.file(&format!("{lang}.ckpt.jsonl"))
     }
+    /// `<stem>.chapters.json`: [`ChaptersFile`].
+    pub fn chapters(&self) -> PathBuf {
+        self.file("chapters.json")
+    }
     /// `<stem>.marks.json`: `marks::MarksFile`.
     pub fn marks(&self) -> PathBuf {
         self.file("marks.json")
@@ -382,6 +386,58 @@ pub struct CompareFile {
 }
 
 // ------------------------------------------------------------------------- llm-worker: translate
+
+/// One topic of a recording. It lasts until the next chapter starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chapter {
+    pub start: f64,
+    pub title: String,
+}
+
+/// `llm-worker --mode chapters --input <this> --out <ChaptersOutput>`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChaptersInput {
+    #[serde(default = "version")]
+    pub version: u32,
+    /// Length of the recording in seconds.
+    pub duration: f64,
+    pub lines: Vec<TimedText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ChaptersStats {
+    #[serde(default)]
+    pub windows: usize,
+    /// Windows that gave nothing usable. Their topics are missing from the result.
+    #[serde(default)]
+    pub failed_windows: usize,
+    /// Chapters proposed before the rules and the merge.
+    #[serde(default)]
+    pub candidates: usize,
+    #[serde(default)]
+    pub elapsed_seconds: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChaptersOutput {
+    #[serde(default = "version")]
+    pub version: u32,
+    pub chapters: Vec<Chapter>,
+    #[serde(default)]
+    pub stats: ChaptersStats,
+}
+
+/// What the player reads, next to the recording's other results.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChaptersFile {
+    #[serde(default = "version")]
+    pub version: u32,
+    /// [`source_hash`] of the lines these came from, to tell when the transcript has moved on.
+    pub source_hash: String,
+    #[serde(default)]
+    pub model: String,
+    pub chapters: Vec<Chapter>,
+}
 
 /// `llm-worker --mode translate --input <this> --out <TranslateOutput>`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

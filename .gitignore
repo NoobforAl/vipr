@@ -23,6 +23,7 @@ tools/
 # ASR experiment outputs
 validation/asr_out/
 validation/diar_out/
+validation/chapters_out/
 
 # build output and release packages
 target-*/

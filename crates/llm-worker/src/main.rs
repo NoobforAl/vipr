@@ -4,7 +4,7 @@
 //! (PLAN.md, Phase 0 finding 2). The app starts it and reads JSON-lines events from stdout.
 //!
 //!   llm-worker --model Qwen3-4B-Instruct-2507-Q4_K_M.gguf --input utterances.json --out refined.json \
-//!              [--glossary glossary.txt] [--cpu] [--ctx 4096] [--mode refine|translate|compare]
+//!              [--glossary glossary.txt] [--cpu] [--ctx 4096] [--mode refine|translate|compare|chapters]
 //!
 //! `--mode` defaults to `refine`, described below. The JSON of `translate` and `compare` is defined
 //! in `engine::project`. With those two modes, `--glossary` lines may be `source=target`, and
@@ -32,10 +32,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use engine::fsio;
 use engine::profiles::GlossaryTerm;
-use engine::project::{CompareInput, CompareOutput, CompareStats, TranslateInput, VERSION};
+use engine::project::{
+    ChaptersInput, CompareInput, CompareOutput, CompareStats, TranslateInput, VERSION,
+};
 use engine::prompts;
 use engine::sanitize::sanitize_untrusted;
 use llm_worker::batch::FitContext;
+use llm_worker::chapters::chapters;
 use llm_worker::checkpoint::Checkpoint;
 use llm_worker::compare::compare;
 use llm_worker::llama::{LlamaChat, init_backend, load_model};
@@ -54,6 +57,8 @@ enum Mode {
     Translate,
     /// Pick the better of two subtitle tracks, row by row
     Compare,
+    /// Find where the topic changes
+    Chapters,
 }
 
 #[derive(Parser)]
@@ -191,6 +196,7 @@ fn run(args: &Args) -> Result<()> {
         Mode::Refine => run_refine(args),
         Mode::Translate => run_translate(args),
         Mode::Compare => run_compare(args),
+        Mode::Chapters => run_chapters(args),
     }
 }
 
@@ -227,6 +233,33 @@ fn run_translate(args: &Args) -> Result<()> {
         "untranslated": output.stats.untranslated,
         "flagged": output.stats.flagged,
         "resumed": output.stats.resumed,
+        "elapsed_seconds": started.elapsed().as_secs_f64(),
+    }));
+    Ok(())
+}
+
+fn run_chapters(args: &Args) -> Result<()> {
+    let started = Instant::now();
+    let input: ChaptersInput = read_input(&args.input)?;
+    if input.lines.is_empty() {
+        bail!("the input has no lines");
+    }
+
+    let t = Instant::now();
+    let backend = init_backend()?;
+    let model = load_model(&backend, &args.model, args.cpu)?;
+    let chat = LlamaChat::new(&backend, &model, args.ctx, args.threads, !args.kv_f16)?;
+    let mut chat = FitContext::new(chat, args.ctx as usize);
+    event(json!({"event": "model_loaded", "seconds": t.elapsed().as_secs_f64()}));
+
+    let output = chapters(&mut chat, &input, &mut percent_events())?;
+    fsio::save_json(&args.out, &output)?;
+
+    event(json!({
+        "event": "done",
+        "output": args.out,
+        "chapters": output.chapters.len(),
+        "failed_windows": output.stats.failed_windows,
         "elapsed_seconds": started.elapsed().as_secs_f64(),
     }));
     Ok(())

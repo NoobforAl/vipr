@@ -2,6 +2,7 @@
 //! llama.cpp chat backend. The binary (`main.rs`) is the process the app starts.
 
 pub mod batch;
+pub mod chapters;
 pub mod checkpoint;
 pub mod compare;
 pub mod guards;

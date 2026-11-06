@@ -898,7 +898,9 @@ impl App {
         };
         let model = match kind {
             out::JobKind::Translate { .. } => self.translate_model_path(),
-            out::JobKind::Compare { .. } => self.model_path(Role::Llm),
+            out::JobKind::Compare { .. } | out::JobKind::Chapters { .. } => {
+                self.model_path(Role::Llm)
+            }
         };
         let context = jobs::JobContext {
             job: self.job_ref(kind.job()),
@@ -1712,7 +1714,7 @@ impl App {
                     self.reviewable.insert(job);
                 }
                 let reload = match finished {
-                    Some(jobs::Finished::Translated { .. })
+                    Some(jobs::Finished::Translated { .. } | jobs::Finished::Chapters { .. })
                         if matches!(self.page, Page::Player(_)) =>
                     {
                         self.update(Message::Player(player::Msg::ReloadTracks))

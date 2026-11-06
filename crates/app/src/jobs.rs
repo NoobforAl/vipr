@@ -10,15 +10,16 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use engine::chapters::transcript_lines;
 use engine::compare::{MAX_REASON_CHARS, check_merged, needs_llm};
 use engine::fsio;
 use engine::lang::clean_separators;
 use engine::profiles::Profile;
 use engine::project::{
-    AiChoice, AiPick, AiStatus, CompareFile, CompareInRow, CompareInput, CompareOutRow,
-    CompareOutput, CompareRow, CompareSource, CueStatus, ImportFile, ProjectMeta, ProjectPaths,
-    TimedText, TranslateInput, TranslateOutput, TranslationCue, TranslationFile, VERSION,
-    source_hash,
+    AiChoice, AiPick, AiStatus, ChaptersFile, ChaptersInput, ChaptersOutput, CompareFile,
+    CompareInRow, CompareInput, CompareOutRow, CompareOutput, CompareRow, CompareSource, CueStatus,
+    ImportFile, ProjectMeta, ProjectPaths, TimedText, TranslateInput, TranslateOutput,
+    TranslationCue, TranslationFile, VERSION, source_hash,
 };
 use engine::registry::{Registry, Role};
 use engine::subalign::{align, best_offset};
@@ -85,6 +86,11 @@ pub enum Finished {
         job: u64,
         /// Rows that needed the AI and did not get a pick, because no model is available.
         not_judged: usize,
+    },
+    Chapters {
+        count: usize,
+        /// Parts of the recording the AI gave nothing usable for.
+        failed_windows: usize,
     },
 }
 
@@ -229,7 +235,26 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             );
             (Task::done(Msg::Tell(notice)), open)
         }
+        Finished::Chapters {
+            count,
+            failed_windows,
+        } => (
+            Task::none(),
+            Out::Notice(chapters_notice(count, failed_windows)),
+        ),
     }
+}
+
+fn chapters_notice(count: usize, failed_windows: usize) -> String {
+    let mut notice = if count == 1 {
+        "Found one topic in this recording.".to_string()
+    } else {
+        format!("Found {count} chapters.")
+    };
+    if failed_windows > 0 {
+        notice.push_str(" Part of the recording could not be read, so a topic may be missing.");
+    }
+    notice
 }
 
 /// The running and waiting runs. Empty when there are none.
@@ -290,6 +315,7 @@ fn label(kind: &JobKind) -> String {
     match kind {
         JobKind::Translate { target, .. } => format!("Translation to {}", language_name(target)),
         JobKind::Compare { .. } => "Subtitle compare".to_string(),
+        JobKind::Chapters { .. } => "Finding chapters".to_string(),
     }
 }
 
@@ -332,6 +358,7 @@ fn execute(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, String
     match &run.kind {
         JobKind::Translate { target, source, .. } => translate(run, target, source, emit),
         JobKind::Compare { a, b, slug, .. } => compare(run, a, b, slug, emit),
+        JobKind::Chapters { .. } => chapters(run, emit),
     }
 }
 
@@ -434,6 +461,57 @@ fn own_cues(paths: &ProjectPaths) -> Result<(Vec<TimedText>, String), String> {
 fn import_file(paths: &ProjectPaths, slug: &str) -> Result<ImportFile, String> {
     check_name(slug)?;
     fsio::load_json(&paths.import(slug)).map_err(|e| load_error("the imported subtitles", e))
+}
+
+// ------------------------------------------------------------------------- chapters
+
+fn chapters(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, String> {
+    let model = run
+        .model
+        .as_deref()
+        .ok_or("no AI model is downloaded. Get one in Settings first.")?;
+    let exe = pipeline::find_worker("llm-worker")
+        .ok_or("the AI engine (llm-worker) was not found next to the app.")?;
+    let model_name = model_id(model, Registry::load_default(None).ok().as_ref())?;
+
+    let paths = &run.job.paths;
+    let t = Transcript::load(&paths.transcript()).map_err(|e| load_error("the transcript", e))?;
+    let lines = transcript_lines(&t);
+    if lines.is_empty() {
+        return Err("there are no lines to work from.".into());
+    }
+    let input = ChaptersInput {
+        version: VERSION,
+        duration: t.audio_seconds,
+        lines,
+    };
+    let input_path = paths.dir.join(format!("{}.chapters-in.json", paths.stem));
+    let out_path = paths.dir.join(format!("{}.chapters-out.json", paths.stem));
+    fsio::save_json(&input_path, &input).map_err(|e| e.to_string())?;
+    call_worker(
+        "chapters",
+        &exe,
+        model,
+        (&input_path, &out_path),
+        Vec::new(),
+        &paths.dir.join("llm-chapters.log"),
+        emit,
+    )?;
+    let output: ChaptersOutput =
+        fsio::load_json(&out_path).map_err(|e| load_error("the chapters", e))?;
+    let file = ChaptersFile {
+        version: VERSION,
+        source_hash: source_hash(&input.lines),
+        model: model_name,
+        chapters: output.chapters,
+    };
+    fsio::save_json(&paths.chapters(), &file).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&out_path);
+    Ok(Finished::Chapters {
+        count: file.chapters.len(),
+        failed_windows: output.stats.failed_windows,
+    })
 }
 
 // ------------------------------------------------------------------------- translate

@@ -858,7 +858,7 @@ pub fn repeats_previous(
 
 /// The answer after any `<think>` block. `None` when the block never ends, which means the token cap
 /// cut the reply off while the model was still thinking.
-pub(crate) fn strip_think(reply: &str) -> Option<&str> {
+pub fn strip_think(reply: &str) -> Option<&str> {
     match reply.rfind("</think>") {
         Some(at) => Some(&reply[at + "</think>".len()..]),
         None if reply.contains("<think>") => None,
@@ -867,7 +867,7 @@ pub(crate) fn strip_think(reply: &str) -> Option<&str> {
 }
 
 /// `12|rest` to `(12, rest)`, also with the digits of other scripts.
-pub(crate) fn parse_id_line(line: &str) -> Option<(u64, &str)> {
+pub fn parse_id_line(line: &str) -> Option<(u64, &str)> {
     let (head, rest) = line.split_once('|')?;
     Some((parse_digits(head.trim())?, rest))
 }

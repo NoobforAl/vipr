@@ -4,6 +4,7 @@
 //! refine, translate and export stages are added in later phases (see PLAN.md).
 
 pub mod audio;
+pub mod chapters;
 pub mod compare;
 pub mod diar;
 pub mod diff;

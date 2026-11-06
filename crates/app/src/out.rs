@@ -53,12 +53,16 @@ pub enum JobKind {
         b: CompareSource,
         slug: String,
     },
+    /// Writes `<stem>.chapters.json`.
+    Chapters { job: u64 },
 }
 
 impl JobKind {
     pub fn job(&self) -> u64 {
         match self {
-            JobKind::Translate { job, .. } | JobKind::Compare { job, .. } => *job,
+            JobKind::Translate { job, .. }
+            | JobKind::Compare { job, .. }
+            | JobKind::Chapters { job } => *job,
         }
     }
 }

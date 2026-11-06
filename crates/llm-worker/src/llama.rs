@@ -46,7 +46,8 @@ impl<'m> LlamaChat<'m> {
     ) -> Result<Self> {
         let mut params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(n_ctx))
-            .with_n_batch(n_ctx.min(2048))
+            // the whole prompt is decoded in one call, so this must hold everything the context can
+            .with_n_batch(n_ctx)
             .with_n_ubatch(512)
             .with_n_threads(threads)
             .with_n_threads_batch(threads);

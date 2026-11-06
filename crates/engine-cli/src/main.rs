@@ -40,6 +40,21 @@ enum Cmd {
     Audio(AudioCmd),
     /// Download and unpack ffmpeg into ViPr's own folder (VIPR_TOOLS_DIR overrides the folder)
     InstallFfmpeg,
+    /// Work out topic chapters from a plain text result ([HH:MM:SS] Speaker: text), to test them without the app
+    Chapters {
+        /// The .txt result
+        #[arg(long)]
+        txt: PathBuf,
+        /// A general AI model (.gguf)
+        #[arg(long)]
+        model: PathBuf,
+        /// Where the chapters go. The worker's input is written next to it.
+        #[arg(long)]
+        out: PathBuf,
+        /// llm-worker to use (default: next to this program)
+        #[arg(long)]
+        worker: Option<PathBuf>,
+    },
     /// Build the canonical transcript from an ASR result (and optional speaker turns) and write .json / .txt / .srt / .vtt
     Export {
         /// Result file written by asr-worker
@@ -173,6 +188,42 @@ fn main() -> Result<()> {
                 engine::tools::InstallStep::Unpacking => println!("\nunpacking..."),
             })?;
             println!("ready: {}", exe.display());
+        }
+        Cmd::Chapters {
+            txt,
+            model,
+            out,
+            worker,
+        } => {
+            let lines = engine::chapters::lines_from_txt(
+                &std::fs::read_to_string(&txt).context("reading the text result")?,
+            );
+            let duration = lines.last().map_or(0.0, |l| l.start + 30.0);
+            let input = engine::project::ChaptersInput {
+                version: engine::project::VERSION,
+                duration,
+                lines,
+            };
+            let input_path = out.with_extension("input.json");
+            engine::fsio::save_json(&input_path, &input)?;
+            let worker = match worker {
+                Some(path) => path,
+                None => std::env::current_exe()?.with_file_name("llm-worker"),
+            };
+            let status = std::process::Command::new(&worker)
+                .args(["--mode", "chapters", "--model"])
+                .arg(&model)
+                .arg("--input")
+                .arg(&input_path)
+                .arg("--out")
+                .arg(&out)
+                .status()
+                .with_context(|| format!("starting {}", worker.display()))?;
+            anyhow::ensure!(status.success(), "the worker failed");
+            let output: engine::project::ChaptersOutput = engine::fsio::load_json(&out)?;
+            for c in &output.chapters {
+                println!("{:>8}  {}", engine::chapters::clock(c.start), c.title);
+            }
         }
         Cmd::Export {
             asr,

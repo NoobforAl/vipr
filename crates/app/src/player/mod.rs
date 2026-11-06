@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering::Acquire;
 use std::time::{Duration, Instant};
 
 use engine::marks::{Mark, MarkKind};
+use engine::project::Chapter;
 use iced::futures::channel::{mpsc, oneshot};
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::keyboard::key::Named;
@@ -28,7 +29,7 @@ use iced::{Alignment, Color, Element, Length, Subscription, Task};
 
 use crate::fade;
 use crate::icons;
-use crate::out::{JobRef, Out, Position, content_align};
+use crate::out::{JobKind, JobRef, Out, Position, content_align};
 use crate::theme::{self, Tokens};
 
 use probe::Probe;
@@ -47,6 +48,7 @@ const TRANSCRIPT_CONTEXT: usize = 3;
 /// Half the seek bar's marker: its travel is inset by this, and the mark ticks have to line up.
 const SLIDER_INSET: f32 = theme::SEEK_MARKER_WIDTH as f32 / 2.0;
 const SEEK_BAR_HEIGHT: f32 = 18.0;
+const CHAPTER_STRIP_HEIGHT: f32 = 20.0;
 const VOLUME_HEIGHT: f32 = 22.0;
 const VOLUME_WIDTH: f32 = 96.0;
 /// A subtitle fades in and out over these, so that lines don't pop.
@@ -91,6 +93,9 @@ pub struct State {
     duration: f64,
     tracks: Vec<Track>,
     active: usize,
+    /// In time order. Each lasts until the next one.
+    chapters: Vec<Chapter>,
+    chapters_stale: bool,
     position: f64,
     paused: bool,
     /// Played to the end: paused there, and the next play starts over.
@@ -148,6 +153,8 @@ impl Default for State {
             picture_since: None,
             dim_since: None,
             undim_since: None,
+            chapters: Vec::new(),
+            chapters_stale: false,
         }
     }
 }
@@ -181,6 +188,8 @@ pub enum Msg {
     /// Read the tracks again, after a translation finishes.
     ReloadTracks,
     TracksLoaded(u64, Option<Arc<TrackSet>>),
+    /// Ask the AI where the topic changes.
+    FindChapters,
     /// Try opening the same job again, after ffmpeg arrives or the media comes back.
     Retry,
 }
@@ -523,6 +532,13 @@ fn handle(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
         }
         Msg::TracksLoaded(token, Some(set)) if token == state.token => {
             set_tracks(state, set.tracks.clone());
+            state.chapters = set.chapters.clone();
+            state.chapters_stale = set.chapters_stale;
+        }
+        Msg::FindChapters => {
+            if let Some(job) = &state.job {
+                return (task, Out::Enqueue(JobKind::Chapters { job: job.id }));
+            }
         }
         Msg::Retry => {
             state.token += 1;
@@ -550,6 +566,8 @@ fn on_loaded(state: &mut State, loaded: Option<Arc<Loaded>>) -> Task<Msg> {
     };
     state.notices = loaded.set.problems.clone();
     set_tracks(state, loaded.set.tracks.clone());
+    state.chapters = loaded.set.chapters.clone();
+    state.chapters_stale = loaded.set.chapters_stale;
     let ffmpeg = match phase_after_load(&loaded, &media_name(&job)) {
         Ok(ffmpeg) => ffmpeg,
         Err(phase) => {
@@ -685,6 +703,58 @@ fn seek_bar<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
     stack![bar, line].width(Length::Fill).into()
 }
 
+/// The share of the strip each chapter gets. Even a tiny chapter stays something to click.
+fn chapter_portions(chapters: &[Chapter], duration: f64) -> Vec<u16> {
+    (0..chapters.len())
+        .map(|i| {
+            let end = chapters.get(i + 1).map_or(duration, |next| next.start);
+            let share = ((end - chapters[i].start) / duration).clamp(0.0, 1.0);
+            ((share * TICK_SCALE as f64).round() as u16).max(1)
+        })
+        .collect()
+}
+
+/// The chapter playing at `position`.
+fn chapter_at(chapters: &[Chapter], position: f64) -> Option<usize> {
+    chapters
+        .partition_point(|c| c.start <= position)
+        .checked_sub(1)
+}
+
+/// One clickable piece per chapter, lined up with the seek bar under it.
+fn chapter_strip<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
+    if state.chapters.is_empty() || state.duration <= 0.0 {
+        return None;
+    }
+    let current = chapter_at(&state.chapters, state.position);
+    let mut strip = row![]
+        .spacing(2)
+        .height(CHAPTER_STRIP_HEIGHT)
+        .padding([0.0, SLIDER_INSET]);
+    let portions = chapter_portions(&state.chapters, state.duration);
+    for (i, (chapter, portion)) in state.chapters.iter().zip(portions).enumerate() {
+        let now = current == Some(i);
+        strip = strip.push(
+            button(
+                container(
+                    label(chapter.title.as_str())
+                        .size(11)
+                        .color(if now { t.text } else { t.muted })
+                        .shaping(Shaping::Advanced)
+                        .wrapping(Wrapping::None),
+                )
+                .clip(true),
+            )
+            .padding([2, 4])
+            .width(Length::FillPortion(portion))
+            .height(CHAPTER_STRIP_HEIGHT)
+            .style(theme::flat(t, now))
+            .on_press(Msg::SeekTo(chapter.start)),
+        );
+    }
+    Some(strip.into())
+}
+
 fn tool<'a>(icon: &'static str, size: f32, msg: Msg, t: Tokens) -> Element<'a, Msg> {
     button(icons::icon(icon, size, t.text))
         .padding([5, 7])
@@ -780,6 +850,19 @@ fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
         .on_press(Msg::ReloadTracks)
         .style(theme::flat(t, false)),
     );
+    let find_label = match (state.chapters.is_empty(), state.chapters_stale) {
+        (true, _) => "Find chapters",
+        (false, true) => "Chapters out of date: find again",
+        (false, false) => "Find chapters again",
+    };
+    tracks = tracks.push(
+        button(label(find_label).size(12))
+            .padding([2, 8])
+            .on_press(Msg::FindChapters)
+            .style(theme::flat(t, false)),
+    );
+    let chapter_title = chapter_at(&state.chapters, state.position)
+        .map_or("", |i| state.chapters[i].title.as_str());
     let status_line = container(
         row![
             label(status)
@@ -788,6 +871,11 @@ fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
                 .width(Length::Fixed(58.0)),
             tracks,
             space::horizontal(),
+            label(chapter_title)
+                .size(12)
+                .color(t.muted)
+                .shaping(Shaping::Advanced)
+                .wrapping(Wrapping::None),
             label(time).size(12).color(t.text),
         ]
         .spacing(8)
@@ -818,10 +906,14 @@ fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
         );
     }
     column![
-        container(col.push(seek_bar(state, t, marks)).push(transport))
-            .width(Length::Fill)
-            .padding([6, 8])
-            .style(theme::strip(t)),
+        container(
+            col.push(chapter_strip(state, t))
+                .push(seek_bar(state, t, marks))
+                .push(transport),
+        )
+        .width(Length::Fill)
+        .padding([6, 8])
+        .style(theme::strip(t)),
         status_line,
     ]
     .into()
@@ -1094,6 +1186,30 @@ pub fn position(state: &State) -> Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chapter(start: f64) -> Chapter {
+        Chapter {
+            start,
+            title: "t".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_chapter_playing_follows_the_position() {
+        let chapters = [chapter(0.0), chapter(100.0)];
+        assert_eq!(chapter_at(&chapters, 0.0), Some(0));
+        assert_eq!(chapter_at(&chapters, 99.9), Some(0));
+        assert_eq!(chapter_at(&chapters, 100.0), Some(1));
+        assert_eq!(chapter_at(&[], 5.0), None);
+    }
+
+    #[test]
+    fn chapter_pieces_match_their_length_and_a_tiny_one_stays_clickable() {
+        let chapters = [chapter(0.0), chapter(250.0), chapter(250.001)];
+        assert_eq!(chapter_portions(&chapters, 1000.0), [2500, 1, 7500]);
+        // a wrong duration can't overflow or panic
+        assert_eq!(chapter_portions(&chapters[..1], 1.0), [TICK_SCALE as u16]);
+    }
     use crate::out::JobRef;
     use engine::project::ProjectPaths;
 

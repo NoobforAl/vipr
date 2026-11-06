@@ -6,9 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use engine::chapters::transcript_lines;
 use engine::diff::{DiffKind, DiffSpan, diff_words};
 use engine::lang::{clean_separators, isolate_rtl, language};
-use engine::project::{ProjectPaths, TranslationFile};
+use engine::project::{Chapter, ChaptersFile, ProjectPaths, TranslationFile, source_hash};
 use engine::subtitles::{SubtitleOptions, build_cues};
 use engine::transcript::Transcript;
 
@@ -178,15 +179,43 @@ fn translation_langs(names: impl Iterator<Item = String>, stem: &str) -> Vec<Str
 #[derive(Debug, Clone, Default)]
 pub struct TrackSet {
     pub tracks: Vec<Track>,
+    /// Safe for a widget. Empty until they've been worked out.
+    pub chapters: Vec<Chapter>,
+    /// The transcript has changed since the chapters were worked out.
+    pub chapters_stale: bool,
     /// For the user: what couldn't be read.
     pub problems: Vec<String>,
+}
+
+fn load_chapters(paths: &ProjectPaths, t: &Transcript, set: &mut TrackSet) {
+    let path = paths.chapters();
+    if !path.is_file() {
+        return;
+    }
+    let Ok(file) = engine::fsio::load_json::<ChaptersFile>(&path) else {
+        set.problems
+            .push("The chapters couldn't be read.".to_string());
+        return;
+    };
+    set.chapters_stale = file.source_hash != source_hash(&transcript_lines(t));
+    set.chapters = file
+        .chapters
+        .into_iter()
+        .map(|c| Chapter {
+            start: c.start,
+            title: clean_separators(&c.title).replace('\n', " "),
+        })
+        .collect();
 }
 
 /// Touches the disk, so call it off the UI thread.
 pub fn load_tracks(paths: &ProjectPaths) -> TrackSet {
     let mut set = TrackSet::default();
     match Transcript::load(&paths.transcript()) {
-        Ok(t) => set.tracks.push(original_track(&t)),
+        Ok(t) => {
+            set.tracks.push(original_track(&t));
+            load_chapters(paths, &t, &mut set);
+        }
         Err(_) => set
             .problems
             .push("The original subtitles couldn't be read.".to_string()),
@@ -298,6 +327,39 @@ mod tests {
         assert!(!original_track(&not_refined).cues[0].ai_edited);
         let spacing = transcript(true, vec![utterance(1, 0.0, "a  b", "a b")]);
         assert!(!original_track(&spacing).cues[0].ai_edited);
+    }
+
+    #[test]
+    fn chapters_load_clean_and_say_when_the_transcript_moved_on() {
+        let dir = std::env::temp_dir().join(format!("vipr-chapters-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = ProjectPaths::new(&dir, "clip");
+        let mut t = transcript(true, vec![utterance(1, 0.0, "hello", "hello")]);
+        t.save(&paths.transcript()).unwrap();
+        let file = ChaptersFile {
+            version: 1,
+            source_hash: source_hash(&transcript_lines(&t)),
+            model: String::new(),
+            chapters: vec![Chapter {
+                start: 0.0,
+                title: "a\u{2029}b".to_string(),
+            }],
+        };
+        engine::fsio::save_json(&paths.chapters(), &file).unwrap();
+
+        let set = load_tracks(&paths);
+        assert_eq!(set.chapters[0].title, "a b");
+        assert!(!set.chapters_stale);
+
+        t.utterances[0].text = "changed".to_string();
+        t.save(&paths.transcript()).unwrap();
+        assert!(load_tracks(&paths).chapters_stale);
+
+        std::fs::write(paths.chapters(), "{ not json").unwrap();
+        let broken = load_tracks(&paths);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(broken.chapters.is_empty());
+        assert_eq!(broken.problems.len(), 1);
     }
 
     #[test]
