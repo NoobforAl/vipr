@@ -232,8 +232,8 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             flagged,
         } => {
             let mut notice = format!(
-                "Translated {translated} lines to {}.",
-                language_name(&target)
+                "Translated {translated} lines to {name}. To see them, open the player and choose {name}.",
+                name = language_name(&target)
             );
             if untranslated > 0 {
                 notice.push_str(&format!(

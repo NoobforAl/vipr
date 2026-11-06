@@ -236,7 +236,12 @@ pub fn wrap(text: &str, width: usize, max_lines: usize) -> String {
     // then break inside a word that is too long to fit on a line anywhere
     let lines_needed = total.div_ceil(width).clamp(2, max_lines);
     let even = total.div_ceil(lines_needed);
+    // a line one character too wide reads better than a broken word, which also damages the text sent to translation
+    let word_too_long = widths.iter().any(|w| *w > width);
     for (limit, at_spaces) in [(even, true), (width, true), (even, false), (width, false)] {
+        if !at_spaces && !word_too_long {
+            continue;
+        }
         let lines = fill_lines(&flat, limit, max_lines, at_spaces);
         if lines.iter().all(|l| display_width(l) <= width) {
             return lines.join(
@@ -609,6 +614,21 @@ mod tests {
     fn a_long_word_among_short_ones_still_fits() {
         let out = check_wrap(&format!("see {} now", "x".repeat(50)), 42, 2);
         assert!(out.split('\n').all(|l| l.chars().count() <= 42), "{out}");
+    }
+
+    #[test]
+    fn a_word_is_never_broken_just_because_a_line_is_slightly_too_long() {
+        let out = check_wrap(
+            "I'm very satisfied with what we've got, but I just want to have one eye on the fact",
+            42,
+            2,
+        );
+        assert!(out.contains("but"), "{out:?}");
+        for word in ["satisfied", "want", "fact"] {
+            assert!(out.contains(word), "{out:?}");
+        }
+        let words = out.split_whitespace().count();
+        assert_eq!(words, 18, "{out:?}");
     }
 
     #[test]
