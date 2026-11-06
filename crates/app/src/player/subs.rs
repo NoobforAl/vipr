@@ -3,6 +3,10 @@
 //! All of this text is untrusted. `clean_separators` runs on it here, once, before any widget sees
 //! it, and the display-only `isolate_rtl` form is kept apart from the plain text.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use engine::diff::{DiffKind, DiffSpan, diff_words};
 use engine::lang::{clean_separators, isolate_rtl, language};
 use engine::project::{ProjectPaths, TranslationFile};
 use engine::subtitles::{SubtitleOptions, build_cues};
@@ -20,6 +24,30 @@ pub struct SubCue {
     /// How many lines `text` needs in the timeline panel. Worked out once, since the panel asks for
     /// every cue on every redraw.
     pub panel_lines: u16,
+    /// The AI cleanup changed the utterance this cue belongs to.
+    pub ai_edited: bool,
+    /// What it changed. Only on the utterance's first cue: an utterance splits into cues differently before and
+    /// after the cleanup, so only the whole utterance can be compared.
+    pub ai_diff: Option<Arc<AiDiff>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AiDiff {
+    /// Safe for a widget.
+    pub spans: Vec<DiffSpan>,
+    /// How many lines `spans` need in the timeline panel.
+    pub panel_lines: u16,
+}
+
+/// What the AI cleanup changed, `None` when no word changed.
+fn ai_diff(raw: &str, text: &str) -> Option<AiDiff> {
+    let spans = diff_words(&clean_separators(raw), &clean_separators(text));
+    if spans.iter().all(|s| s.kind == DiffKind::Same) {
+        return None;
+    }
+    let chars: usize = spans.iter().map(|s| s.text.chars().count() + 1).sum();
+    let panel_lines = chars.div_ceil(PANEL_LINE_CHARS).max(1) as u16;
+    Some(AiDiff { spans, panel_lines })
 }
 
 /// Characters on one line of the timeline panel, on the low side so text is rarely cut off.
@@ -37,6 +65,8 @@ impl SubCue {
             text,
             overlay,
             panel_lines,
+            ai_edited: false,
+            ai_diff: None,
         }
     }
 }
@@ -92,10 +122,29 @@ impl Track {
 }
 
 fn original_track(t: &Transcript) -> Track {
+    let mut diffs: HashMap<usize, Arc<AiDiff>> = HashMap::new();
+    if t.refined {
+        for u in &t.utterances {
+            if let Some(diff) = ai_diff(&u.raw_text, &u.text) {
+                diffs.insert(u.id, Arc::new(diff));
+            }
+        }
+    }
+    let mut shown: HashSet<usize> = HashSet::new();
     let cues = build_cues(t, &SubtitleOptions::default())
         .iter()
         .enumerate()
-        .map(|(i, c)| SubCue::new(i as u64 + 1, c.start, c.end, &c.text))
+        .map(|(i, c)| {
+            let mut cue = SubCue::new(i as u64 + 1, c.start, c.end, &c.text);
+            if let Some(diff) = diffs.get(&c.utterance) {
+                cue.ai_edited = true;
+                // a cue with nothing to show is left out of the track, so it can't carry the difference
+                if !cue.text.is_empty() && cue.end > cue.start && shown.insert(c.utterance) {
+                    cue.ai_diff = Some(diff.clone());
+                }
+            }
+            cue
+        })
         .collect();
     Track::new("Original".to_string(), cues)
 }
@@ -199,6 +248,64 @@ mod tests {
         assert_eq!(t.next_start(30.0), Some(50.0));
         assert_eq!(t.next_start(55.0), None);
         assert_eq!(track(vec![]).prev_start(1.0), None);
+    }
+
+    fn utterance(id: usize, start: f64, raw: &str, text: &str) -> engine::transcript::Utterance {
+        engine::transcript::Utterance {
+            id,
+            start,
+            end: start + 20.0,
+            speaker: 0,
+            raw_text: raw.to_string(),
+            text: text.to_string(),
+            words: vec![],
+        }
+    }
+
+    fn transcript(refined: bool, utterances: Vec<engine::transcript::Utterance>) -> Transcript {
+        let mut t: Transcript = serde_json::from_value(serde_json::json!({
+            "version": 1, "source": "", "language": "", "audio_seconds": 0.0, "speakers": [], "utterances": []
+        }))
+        .unwrap();
+        t.refined = refined;
+        t.utterances = utterances;
+        t
+    }
+
+    #[test]
+    fn the_difference_sits_on_the_first_cue_of_a_changed_utterance_only() {
+        let long = "The first sentence is here and it is long enough. ".repeat(4);
+        let t = transcript(
+            true,
+            vec![
+                utterance(1, 0.0, &long, &long),
+                utterance(2, 30.0, &format!("helo {long}"), &format!("hello {long}")),
+            ],
+        );
+        let track = original_track(&t);
+        let second: Vec<&SubCue> = track.cues.iter().filter(|c| c.start >= 30.0).collect();
+        assert!(second.len() > 1, "the utterance has to split for this test");
+        assert!(second.iter().all(|c| c.ai_edited));
+        assert!(second[0].ai_diff.is_some());
+        assert!(second[1..].iter().all(|c| c.ai_diff.is_none()));
+        let mut first = track.cues.iter().filter(|c| c.start < 30.0);
+        assert!(first.all(|c| !c.ai_edited && c.ai_diff.is_none()));
+    }
+
+    #[test]
+    fn nothing_is_marked_before_the_cleanup_ran_or_when_only_spacing_changed() {
+        let not_refined = transcript(false, vec![utterance(1, 0.0, "helo", "hello")]);
+        assert!(!original_track(&not_refined).cues[0].ai_edited);
+        let spacing = transcript(true, vec![utterance(1, 0.0, "a  b", "a b")]);
+        assert!(!original_track(&spacing).cues[0].ai_edited);
+    }
+
+    #[test]
+    fn the_difference_is_cleaned_for_a_widget() {
+        let diff = ai_diff("abc\u{2029}سلام", "abd\u{2029}سلام").unwrap();
+        assert!(diff.spans.iter().all(|s| !s.text.contains('\u{2029}')));
+        assert_eq!(diff.panel_lines, 1);
+        assert_eq!(ai_diff("same", "same"), None);
     }
 
     #[test]

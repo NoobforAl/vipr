@@ -309,6 +309,7 @@ fn reviewed_output(rows: &[CompareRow]) -> Result<Reviewed, Vec<u64>> {
             end: row.end.max(row.start),
             text,
             speaker: 0,
+            utterance: 0,
         });
     }
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));

@@ -2,7 +2,9 @@
 //! Small models love to over-edit, so every proposed line is checked against the original here, in code.
 //! Nothing in a prompt (category, video description) can change these rules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use engine::diff::matching_blocks;
 
 /// Filler words ignored when comparing a line with its edit.
 pub const FILLERS: [&str; 6] = ["uh", "um", "uhm", "erm", "umm", "uhh"];
@@ -41,86 +43,8 @@ pub fn sequence_ratio(a: &[String], b: &[String]) -> f64 {
     if total == 0 {
         return 1.0;
     }
-    2.0 * matched(a, b) as f64 / total as f64
-}
-
-fn matched(a: &[String], b: &[String]) -> usize {
-    // b2j: element -> ascending positions in b
-    let mut b2j: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (j, w) in b.iter().enumerate() {
-        b2j.entry(w.as_str()).or_default().push(j);
-    }
-    if b.len() >= 200 {
-        let ntest = b.len() / 100 + 1;
-        b2j.retain(|_, v| v.len() <= ntest);
-    }
-
-    let mut queue = vec![(0usize, a.len(), 0usize, b.len())];
-    let mut sum = 0;
-    while let Some((alo, ahi, blo, bhi)) = queue.pop() {
-        let (i, j, k) = longest_match(a, b, &b2j, alo, ahi, blo, bhi);
-        if k > 0 {
-            sum += k;
-            if alo < i && blo < j {
-                queue.push((alo, i, blo, j));
-            }
-            if i + k < ahi && j + k < bhi {
-                queue.push((i + k, ahi, j + k, bhi));
-            }
-        }
-    }
-    sum
-}
-
-fn longest_match(
-    a: &[String],
-    b: &[String],
-    b2j: &HashMap<&str, Vec<usize>>,
-    alo: usize,
-    ahi: usize,
-    blo: usize,
-    bhi: usize,
-) -> (usize, usize, usize) {
-    let (mut besti, mut bestj, mut bestsize) = (alo, blo, 0usize);
-    let mut j2len: HashMap<usize, usize> = HashMap::new();
-    for (i, word) in a.iter().enumerate().take(ahi).skip(alo) {
-        let mut newj2len: HashMap<usize, usize> = HashMap::new();
-        if let Some(js) = b2j.get(word.as_str()) {
-            for &j in js {
-                if j < blo {
-                    continue;
-                }
-                if j >= bhi {
-                    break;
-                }
-                let k = if j > 0 {
-                    j2len.get(&(j - 1)).copied().unwrap_or(0)
-                } else {
-                    0
-                } + 1;
-                newj2len.insert(j, k);
-                if k > bestsize {
-                    besti = i + 1 - k;
-                    bestj = j + 1 - k;
-                    bestsize = k;
-                }
-            }
-        }
-        j2len = newj2len;
-    }
-    // extend the best match over equal neighbours (only matters when popular elements were dropped)
-    while besti > alo && bestj > blo && a[besti - 1] == b[bestj - 1] {
-        besti -= 1;
-        bestj -= 1;
-        bestsize += 1;
-    }
-    while besti + bestsize < ahi
-        && bestj + bestsize < bhi
-        && a[besti + bestsize] == b[bestj + bestsize]
-    {
-        bestsize += 1;
-    }
-    (besti, bestj, bestsize)
+    let matched: usize = matching_blocks(a, b).iter().map(|&(_, _, k)| k).sum();
+    2.0 * matched as f64 / total as f64
 }
 
 /// Reject rewrites: the corrected line must stay close to what was said.

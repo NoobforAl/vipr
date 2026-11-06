@@ -54,6 +54,8 @@ pub struct Cue {
     /// Lines joined with `\n`.
     pub text: String,
     pub speaker: usize,
+    /// The `Utterance::id` this cue came from, 0 when it did not come from a transcript.
+    pub utterance: usize,
 }
 
 #[derive(Clone)]
@@ -336,6 +338,7 @@ pub fn build_cues(t: &Transcript, opts: &SubtitleOptions) -> Vec<Cue> {
                 end,
                 text: wrap(&text, opts.max_chars_per_line, opts.max_lines),
                 speaker: u.speaker,
+                utterance: u.id,
             });
         }
         last_speaker = Some(u.speaker);
@@ -529,6 +532,7 @@ mod tests {
             end: 3663.25,
             text: "Hello\nthere".into(),
             speaker: 0,
+            utterance: 0,
         }];
         assert_eq!(
             to_srt(&cues),
@@ -691,6 +695,7 @@ mod tests {
             end: 2.0,
             text: "سلام\nدنیا".into(),
             speaker: 0,
+            utterance: 0,
         }];
         let marked = mark_rtl(&cues, "fa");
         assert_eq!(

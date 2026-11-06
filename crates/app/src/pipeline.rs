@@ -711,6 +711,7 @@ fn translated_cues(file: &TranslationFile) -> Vec<Cue> {
                 end: c.end,
                 text: wrap(&text, opts.max_chars_per_line, opts.max_lines),
                 speaker: 0,
+                utterance: 0,
             }
         })
         .collect()

@@ -10,6 +10,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use engine::diff::DiffKind;
 use engine::lang::clean_separators;
 use engine::marks::{Mark, MarkKind, MarkStore};
 use iced::futures::channel::oneshot;
@@ -17,14 +18,15 @@ use iced::keyboard::{Key, Modifiers};
 use iced::widget::scrollable::{AbsoluteOffset, Direction, Scrollbar};
 use iced::widget::text::{Shaping, Wrapping};
 use iced::widget::{
-    Id, button, center, column, container, row, scrollable, space, text, text_input,
+    Id, button, center, column, container, rich_text, row, scrollable, space, span, text,
+    text_input,
 };
 use iced::{Alignment, Element, Length, Task};
 
 use crate::fade;
 use crate::icons;
 use crate::out::{JobRef, Out, Position, content_align};
-use crate::player::SubCue;
+use crate::player::{AiDiff, SubCue};
 use crate::saver;
 use crate::theme::{self, Tokens};
 
@@ -98,6 +100,8 @@ pub struct State {
     lit: Option<(usize, Instant)>,
     /// The line whose highlight is fading out.
     unlit: Option<(usize, Instant)>,
+    /// The lines also show what the AI cleanup changed.
+    show_changes: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +127,8 @@ pub enum Msg {
     /// Offset and height of the panel.
     Scrolled(f32, f32),
     FollowAgain,
+    /// Show or hide what the AI cleanup changed.
+    ToggleChanges,
 }
 
 /// The player page is opening on `job`: load its marks. A note still open is saved first.
@@ -222,6 +228,12 @@ fn handle(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
         Msg::FollowAgain => {
             state.not_following = false;
             state.followed = None;
+        }
+        Msg::ToggleChanges => {
+            state.show_changes = !state.show_changes;
+            // row heights changed, so the line followed has moved
+            state.followed = None;
+            state.glide = None;
         }
     }
     (Task::none(), Out::None)
@@ -377,8 +389,12 @@ fn gap_time(cues: &[SubCue], prev: Option<usize>) -> f64 {
     }
 }
 
-fn cue_height(cue: &SubCue) -> f32 {
-    f32::from(cue.panel_lines) * LINE_HEIGHT + CUE_PADDING
+fn cue_height(state: &State, cue: &SubCue) -> f32 {
+    let diff_lines = match &cue.ai_diff {
+        Some(diff) if state.show_changes => diff.panel_lines,
+        _ => 0,
+    };
+    f32::from(cue.panel_lines + diff_lines) * LINE_HEIGHT + CUE_PADDING
 }
 
 fn mark_height(state: &State, mark: &Mark) -> f32 {
@@ -411,7 +427,7 @@ fn layout(state: &State, cues: &[SubCue], marks: &[Mark]) -> Vec<(Item, f32)> {
         items.push((Item::Gap(None), GAP_HEIGHT));
     }
     for (i, cue) in cues.iter().enumerate() {
-        items.push((Item::Cue(i), cue_height(cue)));
+        items.push((Item::Cue(i), cue_height(state, cue)));
         let before = cues.get(i + 1).map_or(f64::INFINITY, |next| next.start);
         push_marks(&mut items, &mut next_mark, before);
         items.push((Item::Gap(Some(i)), GAP_HEIGHT));
@@ -584,6 +600,33 @@ pub fn view<'a>(
             .size(12)
             .color(t.muted),
     );
+    if cues.iter().any(|c| c.ai_edited) {
+        let label = if state.show_changes {
+            "Hide AI changes"
+        } else {
+            "Show AI changes"
+        };
+        let mut changes = row![
+            button(text(label).size(12))
+                .padding([4, 8])
+                .style(theme::flat(t, state.show_changes))
+                .on_press(Msg::ToggleChanges)
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if state.show_changes {
+            changes = changes.push(
+                rich_text(vec![
+                    span("removed").color(t.bad).strikethrough(true),
+                    span("  "),
+                    span("added").color(t.ok),
+                ])
+                .on_link_click(iced::never)
+                .size(12),
+            );
+        }
+        head = head.push(changes);
+    }
 
     let marks = marks(state);
     let items = layout(state, cues, marks);
@@ -659,13 +702,20 @@ fn cue_row<'a>(
     )
     .width(Length::Fill)
     .align_x(align);
+    let mut lines = column![words];
+    if state.show_changes
+        && let Some(diff) = &cue.ai_diff
+    {
+        lines = lines.push(change_line(diff, t));
+    }
+    let edited = state.show_changes && cue.ai_edited;
     let jump = button(
         row![
             text(clock(cue.start))
                 .size(11)
-                .color(t.faint)
+                .color(if edited { t.accent } else { t.faint })
                 .width(Length::Fixed(44.0)),
-            words,
+            lines,
         ]
         .spacing(4),
     )
@@ -699,6 +749,32 @@ fn cue_row<'a>(
         .clip(true)
         .style(theme::current_line(t, strength))
         .into()
+}
+
+/// The words of an utterance with what the AI cleanup removed and added.
+fn change_line<'a>(diff: &'a AiDiff, t: Tokens) -> Element<'a, Msg> {
+    let plain: Vec<&str> = diff.spans.iter().map(|s| s.text.as_str()).collect();
+    let mut spans = Vec::with_capacity(diff.spans.len() * 2);
+    for (i, piece) in diff.spans.iter().enumerate() {
+        if i > 0 {
+            spans.push(span(" "));
+        }
+        spans.push(match piece.kind {
+            DiffKind::Same => span(piece.text.as_str()).color(t.faint),
+            DiffKind::Removed => span(piece.text.as_str()).color(t.bad).strikethrough(true),
+            DiffKind::Added => span(piece.text.as_str()).color(t.ok),
+        });
+    }
+    // default-aligned text in an aligned container: aligning RTL text itself can make it vanish
+    container(
+        rich_text(spans)
+            .on_link_click(iced::never)
+            .size(12)
+            .wrapping(Wrapping::WordOrGlyph),
+    )
+    .width(Length::Fill)
+    .align_x(content_align(&plain.join(" ")))
+    .into()
 }
 
 fn mark_row<'a>(state: &'a State, mark: &'a Mark, height: f32, t: Tokens) -> Element<'a, Msg> {
@@ -889,7 +965,24 @@ mod tests {
             text: "line".to_string(),
             overlay: "line".to_string(),
             panel_lines: 1,
+            ai_edited: false,
+            ai_diff: None,
         }
+    }
+
+    #[test]
+    fn a_shown_change_makes_its_row_taller_so_it_is_not_cut_off() {
+        let mut changed = cue(1, 0.0, 1.0);
+        changed.ai_edited = true;
+        changed.ai_diff = Some(Arc::new(AiDiff {
+            spans: vec![],
+            panel_lines: 2,
+        }));
+        let mut state = State::default();
+        let closed = cue_height(&state, &changed);
+        state.show_changes = true;
+        assert_eq!(cue_height(&state, &changed), closed + 2.0 * LINE_HEIGHT);
+        assert_eq!(cue_height(&state, &cue(2, 1.0, 2.0)), closed);
     }
 
     fn at(time: f64, cue: Option<u64>) -> Position {

@@ -33,7 +33,7 @@ use crate::theme::{self, Tokens};
 
 use probe::Probe;
 use session::{Config, Session, Shared};
-pub use subs::SubCue;
+pub use subs::{AiDiff, SubCue};
 use subs::{Track, TrackSet, load_tracks};
 
 const NUDGE_SECS: f64 = 5.0;
@@ -1252,6 +1252,8 @@ mod tests {
                     text: format!("line {i}"),
                     overlay: format!("line {i}"),
                     panel_lines: 1,
+                    ai_edited: false,
+                    ai_diff: None,
                 })
                 .collect(),
         }

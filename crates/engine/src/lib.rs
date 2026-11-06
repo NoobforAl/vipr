@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod compare;
 pub mod diar;
+pub mod diff;
 pub mod download;
 pub mod fsio;
 pub mod lang;
