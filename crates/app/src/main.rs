@@ -33,8 +33,8 @@ use gpu_detect::Detection;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, pick_list, progress_bar, responsive,
-    row, scrollable, space, stack, svg, text, text_editor, text_input, toggler,
+    button, center, column, combo_box, container, mouse_area, opaque, pick_list, progress_bar,
+    responsive, row, scrollable, space, stack, svg, text, text_editor, text_input, toggler,
 };
 use iced::{
     Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, keyboard,
@@ -306,13 +306,15 @@ fn file_name(path: &std::path::Path) -> String {
 #[derive(Debug, Clone)]
 struct Notice {
     text: String,
-    /// `None` stays until dismissed.
-    expires: Option<Instant>,
+    expires: Instant,
 }
 
 /// How long an `Out::Notice` stays up.
-const NOTICE_TIME: Duration = Duration::from_secs(15);
+const NOTICE_TIME: Duration = Duration::from_secs(5);
 const MAX_NOTICES: usize = 8;
+/// The message in the corner of the window.
+const TOAST_WIDTH: f32 = 380.0;
+const TOAST_MARGIN: f32 = 16.0;
 
 /// Progress of the one-click ffmpeg download.
 #[derive(Debug, Clone)]
@@ -337,6 +339,15 @@ impl fmt::Display for LanguageChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.0.name, self.0.code)
     }
+}
+
+/// The languages a transcript can be translated to. Not its own: that would fail in the worker.
+fn translate_options(source: Option<&str>) -> Vec<LanguageChoice> {
+    LANGUAGES
+        .iter()
+        .filter(|l| Some(l.code) != source)
+        .map(LanguageChoice)
+        .collect()
 }
 
 /// Which copy button was pressed last (it shows "Copied" for a moment).
@@ -390,6 +401,8 @@ enum Message {
     Go(Page),
     OpenImport(u64),
     TranslateTarget(LanguageChoice),
+    /// The translate box lost focus: whatever was typed there is dropped.
+    TranslateBoxClosed,
     Translate(u64),
     // saved results
     OpenResult {
@@ -478,6 +491,9 @@ struct App {
     reviewable: HashSet<u64>,
     /// The language picked for "Translate" on the result page.
     translate_target: Option<LanguageChoice>,
+    /// What the translate box searches, and the transcript language it was made for. See [`App::sync_translate_box`].
+    translate_box: combo_box::State<LanguageChoice>,
+    translate_box_source: Option<Option<&'static str>>,
     /// True from pressing Start until the user goes anywhere else: the player may open by itself.
     auto_open: bool,
     /// ffmpeg download in progress, or the last error
@@ -550,6 +566,8 @@ impl App {
             review_ready: None,
             reviewable: HashSet::new(),
             translate_target: None,
+            translate_box: combo_box::State::default(),
+            translate_box_source: None,
             auto_open: false,
             ffmpeg_dl: None,
             ffmpeg_err: None,
@@ -662,7 +680,7 @@ impl App {
             || self.running.is_some()
             || self.copied.is_some()
             || self.notice.is_some()
-            || self.notices.iter().any(|n| n.expires.is_some())
+            || !self.notices.is_empty()
             || self.ffmpeg_dl.is_some()
             || jobs::busy(&self.queue)
     }
@@ -738,24 +756,24 @@ impl App {
                 self.start_next()
             }
             Out::Notice(line) => {
-                self.tell(&line, Some(Instant::now() + NOTICE_TIME));
+                self.tell(&line);
                 Task::none()
             }
             Out::Alert(line) => {
-                self.tell(&line, None);
+                self.tell(&line);
                 Task::none()
             }
         }
     }
 
     /// All notice text passes here: errors can quote paths and file content.
-    fn tell(&mut self, line: &str, expires: Option<Instant>) {
+    fn tell(&mut self, line: &str) {
         if self.notices.len() == MAX_NOTICES {
             self.notices.remove(0);
         }
         self.notices.push(Notice {
             text: clean_separators(line),
-            expires,
+            expires: Instant::now() + NOTICE_TIME,
         });
     }
 
@@ -976,10 +994,9 @@ impl App {
         if let Some(profile) = profiles_ui::active(&self.profiles, &self.settings)
             && let Err(e) = pipeline::apply_profile(&mut input, &profile)
         {
-            self.tell(
-                &format!("The active profile could not be used for this run: {e}"),
-                None,
-            );
+            self.tell(&format!(
+                "The active profile could not be used for this run: {e}"
+            ));
         }
         Task::run(job_stream(input), move |ev| Message::JobEvent(id, ev))
     }
@@ -1056,12 +1073,12 @@ impl App {
                     && self
                         .notice
                         .as_ref()
-                        .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(12))
+                        .is_some_and(|(_, at)| at.elapsed() > NOTICE_TIME)
                 {
                     self.notice = None;
                 }
                 let now = Instant::now();
-                self.notices.retain(|n| n.expires.is_none_or(|at| at > now));
+                self.notices.retain(|n| n.expires > now);
                 Task::none()
             }
             Message::WinId(id) => {
@@ -1451,6 +1468,11 @@ impl App {
                 self.translate_target = Some(choice);
                 Task::none()
             }
+            Message::TranslateBoxClosed => {
+                let source = self.translate_box_source.flatten();
+                self.translate_box = combo_box::State::new(translate_options(source));
+                Task::none()
+            }
             Message::Translate(job) => {
                 let Some(target) = self.translate_target else {
                     return Task::none();
@@ -1470,7 +1492,7 @@ impl App {
                 Message::ResultLoaded,
             ),
             Message::ResultLoaded(Err(e)) => {
-                self.tell(&format!("That result could not be opened: {e}"), None);
+                self.tell(&format!("That result could not be opened: {e}"));
                 Task::none()
             }
             Message::ResultLoaded(Ok(loaded)) => {
@@ -1489,10 +1511,9 @@ impl App {
                     return Task::none();
                 };
                 if let Err(e) = jobs::locate_media(&paths, &path) {
-                    self.tell(
-                        &format!("The new place of the media could not be saved: {e}"),
-                        None,
-                    );
+                    self.tell(&format!(
+                        "The new place of the media could not be saved: {e}"
+                    ));
                 }
                 if let Some(j) = self.job_mut(id) {
                     j.size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -1747,7 +1768,24 @@ impl App {
         if self.page != page {
             self.page_fade = Some((Instant::now(), background));
         }
+        self.sync_translate_box();
         task
+    }
+
+    /// The box keeps its own list, so it is rebuilt when the open transcript has another language.
+    fn sync_translate_box(&mut self) {
+        let Page::Transcript(id) = self.page else {
+            return;
+        };
+        let source = self
+            .job(id)
+            .and_then(|j| j.transcript.as_ref())
+            .and_then(|tr| engine::lang::language(&tr.language))
+            .map(|l| l.code);
+        if self.translate_box_source != Some(source) {
+            self.translate_box_source = Some(source);
+            self.translate_box = combo_box::State::new(translate_options(source));
+        }
     }
 
     /// Something on screen is mid-motion and needs a redraw every frame.
@@ -1828,25 +1866,7 @@ impl App {
                 Page::Player(id) => self.player_page(id),
                 Page::Review(_) => review_ui::view(&self.review, t).map(Message::Review),
             };
-            let banner = self.notice_banner();
-            let content: Element<'_, Message> = if matches!(self.page, Page::Player(_)) {
-                // over the video, so that a message doesn't resize it during playback. Always a stack, since a
-                // change of shape here would rebuild the page and lose the timeline's scroll position.
-                let over: Element<'_, Message> = match banner {
-                    Some(banner) => container(opaque(container(banner).max_width(560)))
-                        // below the row with the back button
-                        .padding(iced::Padding::new(12.0).top(44.0))
-                        .width(Length::Fill)
-                        .into(),
-                    None => space().into(),
-                };
-                stack![page, over].into()
-            } else {
-                match banner {
-                    None => page,
-                    Some(banner) => column![container(banner).padding([8, 16]), page].into(),
-                }
-            };
+            let content = page;
             let divider = container(space::horizontal())
                 .width(Length::Fixed(1.0))
                 .height(Length::Fill)
@@ -1914,6 +1934,17 @@ impl App {
         if !MAC && !self.maximized && !self.fullscreen {
             layers.push(resize_edges());
         }
+        // on top of everything, and only as big as the message: what's under it keeps its place and stays usable
+        if let Some(message) = self.notice_banner() {
+            layers.push(
+                container(opaque(container(message).max_width(TOAST_WIDTH)))
+                    .padding(TOAST_MARGIN)
+                    .align_right(Length::Fill)
+                    .align_bottom(Length::Fill)
+                    .into(),
+            );
+        }
+
         stack(layers).into()
     }
 
@@ -2267,7 +2298,7 @@ impl App {
             )
             .padding(14)
             .width(Length::Fill)
-            .style(theme::card(t))
+            .style(theme::toast(t))
             .into(),
         )
     }
@@ -3029,23 +3060,24 @@ impl App {
     fn result_actions<'a>(&'a self, id: u64, tr: &Transcript) -> Element<'a, Message> {
         let t = self.tokens;
         let source = engine::lang::language(&tr.language).map(|l| l.code);
-        // a translation into the transcript's own language would fail in the worker
-        let options: Vec<LanguageChoice> = LANGUAGES
-            .iter()
-            .filter(|l| Some(l.code) != source)
-            .map(LanguageChoice)
-            .collect();
         let has_model = self.translate_model_path().is_some();
         let target = self.translate_target.filter(|c| Some(c.0.code) != source);
         let again = target
             .zip(self.job(id).and_then(|j| j.paths.as_ref()))
             .is_some_and(|(c, paths)| paths.translation(c.0.code).is_file());
         let mut r = row![
-            pick_list(options, target, Message::TranslateTarget)
-                .placeholder("Translate to...")
-                .text_size(13)
-                .padding([6, 10])
-                .style(theme::pick(t)),
+            combo_box(
+                &self.translate_box,
+                "Translate to... (type to search)",
+                target.as_ref(),
+                Message::TranslateTarget,
+            )
+            .size(13)
+            .padding([6, 10])
+            .width(Length::Fixed(240.0))
+            .on_close(Message::TranslateBoxClosed)
+            .input_style(theme::input(t))
+            .menu_style(theme::search_menu(t)),
             button(
                 text(if again {
                     "Translate again"
@@ -4088,6 +4120,36 @@ fn download_stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_letters_find_languages_anywhere_in_their_name() {
+        let found = |query: &str| -> Vec<String> {
+            super::translate_options(None)
+                .iter()
+                .map(ToString::to_string)
+                .filter(|name| name.to_lowercase().contains(query))
+                .collect()
+        };
+        assert!(found("pers").contains(&"Persian (fa)".to_string()), "start");
+        assert!(
+            found("rsia").contains(&"Persian (fa)".to_string()),
+            "middle"
+        );
+        assert!(found("(fa)").contains(&"Persian (fa)".to_string()), "code");
+    }
+
+    #[test]
+    fn a_transcript_is_not_offered_its_own_language() {
+        let names = |source| -> Vec<&str> {
+            super::translate_options(source)
+                .iter()
+                .map(|l| l.0.code)
+                .collect()
+        };
+        assert!(names(None).contains(&"en"));
+        assert!(!names(Some("en")).contains(&"en"));
+        assert_eq!(names(Some("en")).len() + 1, names(None).len());
+    }
+
     #[test]
     fn the_time_left_stays_a_rough_figure() {
         assert_eq!(super::time_left(20), "less than a minute left");

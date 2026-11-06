@@ -145,6 +145,20 @@ pub fn card(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// A card floating over the page, so it is told apart from what's under it.
+pub fn toast(t: Tokens) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(t.surface)),
+        border: outline(t.rule, RADIUS_M),
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: iced::Vector::new(0.0, 6.0),
+            blur_radius: 20.0,
+        },
+        ..Default::default()
+    }
+}
+
 pub fn panel(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(t.surface)),
@@ -515,6 +529,18 @@ pub fn pick(t: Tokens) -> impl Fn(&Theme, pick_list::Status) -> pick_list::Style
             background: Background::Color(t.bg),
             border: outline(border_color, RADIUS_S),
         }
+    }
+}
+
+/// The list that opens under a search box.
+pub fn search_menu(t: Tokens) -> impl Fn(&Theme) -> iced::overlay::menu::Style {
+    move |_| iced::overlay::menu::Style {
+        background: Background::Color(t.surface),
+        border: outline(t.rule, RADIUS_S),
+        text_color: t.text,
+        selected_text_color: t.on_accent,
+        selected_background: Background::Color(t.accent),
+        shadow: Default::default(),
     }
 }
 

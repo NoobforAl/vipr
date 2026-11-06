@@ -17,7 +17,8 @@ use engine::project::{
 use engine::subparse::{self, Decoded, Parsed};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, button, column, container, pick_list, row, scrollable, space, text, text_editor,
+    Column, button, column, combo_box, container, pick_list, row, scrollable, space, text,
+    text_editor,
 };
 use iced::{Alignment, Color, Element, Length, Task};
 
@@ -144,6 +145,8 @@ pub struct State {
     preview: Option<Preview>,
     action: Action,
     target: Option<Target>,
+    /// What the target language box searches.
+    targets: combo_box::State<Target>,
     /// The target language already has a translation, which this import would replace.
     target_exists: bool,
     overwrite_confirmed: bool,
@@ -171,6 +174,8 @@ pub enum Msg {
     Encoding(EncodingChoice),
     Action(Action),
     Target(Target),
+    /// The target language box lost focus: whatever was typed there is dropped.
+    TargetBoxClosed,
     ConfirmOverwrite(bool),
     Translation(String),
     Start,
@@ -181,6 +186,10 @@ pub enum Msg {
 }
 
 /// Open the dialog for imports into `job`.
+fn target_box() -> combo_box::State<Target> {
+    combo_box::State::new(LANGUAGES.iter().map(Target).collect())
+}
+
 pub fn open(state: &mut State, job: &JobRef) -> (Task<Msg>, Out) {
     let translations = existing_translations(&job.paths);
     *state = State {
@@ -188,6 +197,7 @@ pub fn open(state: &mut State, job: &JobRef) -> (Task<Msg>, Out) {
         job: Some(job.clone()),
         translation: translations.first().cloned(),
         translations,
+        targets: target_box(),
         ..State::default()
     };
     (Task::none(), Out::None)
@@ -247,6 +257,7 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
             state.overwrite_confirmed = false;
             state.target = Some(target);
         }
+        Msg::TargetBoxClosed => state.targets = target_box(),
         Msg::ConfirmOverwrite(confirmed) => state.overwrite_confirmed = confirmed,
         Msg::Translation(lang) => state.translation = Some(lang),
         Msg::Start => return (start(state), Out::None),
@@ -794,12 +805,17 @@ fn action_view(state: &State, t: Tokens) -> Element<'_, Msg> {
 
     let detail: Element<'_, Msg> = match state.action {
         Action::Translate => {
-            let targets: Vec<Target> = LANGUAGES.iter().map(Target).collect();
-            let picker = pick_list(targets, state.target, Msg::Target)
-                .placeholder("Target language")
-                .text_size(13)
-                .padding(8)
-                .style(theme::pick(t));
+            let picker = combo_box(
+                &state.targets,
+                "Target language (type to search)",
+                state.target.as_ref(),
+                Msg::Target,
+            )
+            .size(13)
+            .padding(8)
+            .on_close(Msg::TargetBoxClosed)
+            .input_style(theme::input(t))
+            .menu_style(theme::search_menu(t));
             if state.target_exists {
                 column![
                     picker,
