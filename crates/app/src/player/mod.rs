@@ -23,7 +23,8 @@ use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text::{self, Shaping, Wrapping};
 use iced::widget::{
-    button, center, column, container, row, scrollable, shader, slider, space, stack, text as label,
+    button, center, column, container, row, scrollable, shader, slider, space, stack,
+    text as label, tooltip,
 };
 use iced::{Alignment, Color, Element, Length, Subscription, Task};
 
@@ -734,22 +735,37 @@ fn chapter_strip<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
     let portions = chapter_portions(&state.chapters, state.duration);
     for (i, (chapter, portion)) in state.chapters.iter().zip(portions).enumerate() {
         let now = current == Some(i);
-        strip = strip.push(
-            button(
-                container(
-                    label(chapter.title.as_str())
-                        .size(11)
-                        .color(if now { t.text } else { t.muted })
-                        .shaping(Shaping::Advanced)
-                        .wrapping(Wrapping::None),
-                )
-                .clip(true),
+        let piece = button(
+            container(
+                label(chapter.title.as_str())
+                    .size(11)
+                    .color(if now { t.text } else { t.muted })
+                    .shaping(Shaping::Advanced)
+                    .wrapping(Wrapping::None),
             )
-            .padding([2, 4])
-            .width(Length::FillPortion(portion))
-            .height(CHAPTER_STRIP_HEIGHT)
-            .style(theme::flat(t, now))
-            .on_press(Msg::SeekTo(chapter.start)),
+            .clip(true),
+        )
+        .padding([2, 4])
+        .width(Length::Fill)
+        .height(CHAPTER_STRIP_HEIGHT)
+        .style(theme::flat(t, now))
+        .on_press(Msg::SeekTo(chapter.start));
+        // a short piece cuts its title off, so the whole of it shows on hover
+        let full_title = container(
+            label(format!(
+                "{}  {}",
+                engine::chapters::clock(chapter.start),
+                chapter.title
+            ))
+            .size(12)
+            .color(t.text)
+            .shaping(Shaping::Advanced),
+        )
+        .padding([4, 8])
+        .style(theme::bubble(t));
+        strip = strip.push(
+            container(tooltip(piece, full_title, tooltip::Position::Top))
+                .width(Length::FillPortion(portion)),
         );
     }
     Some(strip.into())
@@ -792,7 +808,12 @@ fn volume_box<'a>(state: &'a State, t: Tokens) -> Element<'a, Msg> {
     .into()
 }
 
-fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, Msg> {
+fn controls<'a>(
+    state: &'a State,
+    t: Tokens,
+    marks: &'a [Mark],
+    finding_chapters: bool,
+) -> Element<'a, Msg> {
     let playing = !state.paused && !state.finished;
     let (play_icon, status) = if state.finished {
         (icons::PLAY_SOLID, "Finished")
@@ -850,15 +871,20 @@ fn controls<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
         .on_press(Msg::ReloadTracks)
         .style(theme::flat(t, false)),
     );
-    let find_label = match (state.chapters.is_empty(), state.chapters_stale) {
-        (true, _) => "Find chapters",
-        (false, true) => "Chapters out of date: find again",
-        (false, false) => "Find chapters again",
+    let find_label = match (
+        finding_chapters,
+        state.chapters.is_empty(),
+        state.chapters_stale,
+    ) {
+        (true, ..) => "Finding chapters...",
+        (false, true, _) => "Find chapters",
+        (false, false, true) => "Chapters out of date: find again",
+        (false, false, false) => "Find chapters again",
     };
     tracks = tracks.push(
         button(label(find_label).size(12))
             .padding([2, 8])
-            .on_press(Msg::FindChapters)
+            .on_press_maybe((!finding_chapters).then_some(Msg::FindChapters))
             .style(theme::flat(t, false)),
     );
     let chapter_title = chapter_at(&state.chapters, state.position)
@@ -1067,8 +1093,14 @@ pub fn is_playing(state: &State) -> bool {
     state.phase == Phase::Playing
 }
 
-/// `marks` are drawn as ticks on the seek bar. They are owned by `marks_ui`.
-pub fn view<'a>(state: &'a State, tokens: Tokens, marks: &'a [Mark]) -> Element<'a, Msg> {
+/// `marks` are drawn as ticks on the seek bar. They are owned by `marks_ui`. `finding_chapters` says a chapters run for
+/// this recording is waiting or running.
+pub fn view<'a>(
+    state: &'a State,
+    tokens: Tokens,
+    marks: &'a [Mark],
+    finding_chapters: bool,
+) -> Element<'a, Msg> {
     match &state.phase {
         Phase::Idle | Phase::Opening => black(space().into()),
         Phase::NoFfmpeg => message_area(
@@ -1083,7 +1115,7 @@ pub fn view<'a>(state: &'a State, tokens: Tokens, marks: &'a [Mark]) -> Element<
             } else {
                 transcript_area(state, tokens)
             };
-            column![main, controls(state, tokens, marks)]
+            column![main, controls(state, tokens, marks, finding_chapters)]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -1586,13 +1618,13 @@ mod tests {
                 phase,
                 ..State::default()
             };
-            drop(view(&s, t, &marks));
+            drop(view(&s, t, &marks, false));
         }
         let mut audio = playing_state();
         audio.has_video = false;
         audio.duration = 10.0;
-        drop(view(&audio, t, &marks));
+        drop(view(&audio, t, &marks, false));
         let video = playing_state();
-        drop(view(&video, t, &marks));
+        drop(view(&video, t, &marks, false));
     }
 }

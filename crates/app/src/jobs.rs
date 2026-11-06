@@ -121,6 +121,11 @@ pub fn enqueue(state: &mut State, kind: JobKind) {
     }
 }
 
+/// This run is waiting or running.
+pub fn pending(state: &State, kind: &JobKind) -> bool {
+    state.running.as_ref().is_some_and(|r| r.kind == *kind) || state.queue.contains(kind)
+}
+
 /// Takes the next queued run.
 pub fn next(state: &mut State) -> Option<JobKind> {
     state.queue.pop_front()
@@ -488,7 +493,7 @@ fn chapters(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, Strin
     let input_path = paths.dir.join(format!("{}.chapters-in.json", paths.stem));
     let out_path = paths.dir.join(format!("{}.chapters-out.json", paths.stem));
     fsio::save_json(&input_path, &input).map_err(|e| e.to_string())?;
-    call_worker(
+    let finished = call_worker(
         "chapters",
         &exe,
         model,
@@ -496,9 +501,13 @@ fn chapters(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, Strin
         Vec::new(),
         &paths.dir.join("llm-chapters.log"),
         emit,
-    )?;
+    );
+    // also after a failure or Cancel, since nothing can continue from these
+    let _ = std::fs::remove_file(&input_path);
+    finished?;
     let output: ChaptersOutput =
         fsio::load_json(&out_path).map_err(|e| load_error("the chapters", e))?;
+    let _ = std::fs::remove_file(&out_path);
     let file = ChaptersFile {
         version: VERSION,
         source_hash: source_hash(&input.lines),
@@ -506,8 +515,6 @@ fn chapters(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, Strin
         chapters: output.chapters,
     };
     fsio::save_json(&paths.chapters(), &file).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&input_path);
-    let _ = std::fs::remove_file(&out_path);
     Ok(Finished::Chapters {
         count: file.chapters.len(),
         failed_windows: output.stats.failed_windows,
@@ -1000,6 +1007,21 @@ mod tests {
             progress: 0.0,
             cancelling: false,
         }
+    }
+
+    #[test]
+    fn a_chapters_run_counts_as_pending_only_for_its_own_recording() {
+        let mine = JobKind::Chapters { job: 1 };
+        let mut state = State::default();
+        assert!(!pending(&state, &mine));
+        enqueue(&mut state, mine.clone());
+        assert!(pending(&state, &mine));
+        assert!(!pending(&state, &JobKind::Chapters { job: 2 }));
+        let _ = next(&mut state);
+        assert!(
+            !pending(&state, &mine),
+            "taken off the queue, not yet running"
+        );
     }
 
     #[test]

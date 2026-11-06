@@ -850,6 +850,7 @@ impl App {
     fn player_page(&self, id: u64) -> Element<'_, Message> {
         let t = theme::PLAYER;
         let marks = marks_ui::marks(&self.marks);
+        let finding_chapters = jobs::pending(&self.queue, &out::JobKind::Chapters { job: id });
         let name = self.job(id).map(Job::name).unwrap_or_default();
         let mut top = row![
             button(icons::icon(icons::BACK, 16.0, t.text))
@@ -871,7 +872,7 @@ impl App {
         }
         let mut video = column![
             container(top).width(Length::Fill).style(theme::strip(t)),
-            player::view(&self.player, t, marks).map(Message::Player)
+            player::view(&self.player, t, marks, finding_chapters).map(Message::Player)
         ]
         .width(Length::Fill)
         .height(Length::Fill);
@@ -1815,18 +1816,24 @@ impl App {
                 Page::Player(id) => self.player_page(id),
                 Page::Review(_) => review_ui::view(&self.review, t).map(Message::Review),
             };
-            let content: Element<'_, Message> = match self.notice_banner() {
-                None => page,
-                // over the video, so that a message doesn't resize it during playback
-                Some(banner) if matches!(self.page, Page::Player(_)) => stack![
-                    page,
-                    container(opaque(container(banner).max_width(560)))
+            let banner = self.notice_banner();
+            let content: Element<'_, Message> = if matches!(self.page, Page::Player(_)) {
+                // over the video, so that a message doesn't resize it during playback. Always a stack, since a
+                // change of shape here would rebuild the page and lose the timeline's scroll position.
+                let over: Element<'_, Message> = match banner {
+                    Some(banner) => container(opaque(container(banner).max_width(560)))
                         // below the row with the back button
                         .padding(iced::Padding::new(12.0).top(44.0))
                         .width(Length::Fill)
-                ]
-                .into(),
-                Some(banner) => column![container(banner).padding([8, 16]), page].into(),
+                        .into(),
+                    None => space().into(),
+                };
+                stack![page, over].into()
+            } else {
+                match banner {
+                    None => page,
+                    Some(banner) => column![container(banner).padding([8, 16]), page].into(),
+                }
             };
             let divider = container(space::horizontal())
                 .width(Length::Fixed(1.0))
