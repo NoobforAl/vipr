@@ -128,11 +128,9 @@ fn segment_window(
 
 /// WeSpeaker embedding of a piece of audio (unit length).
 fn embed(sess: &mut Session, samples: &[f32]) -> Result<Vec<f32>> {
-    let feats = knf_rs::compute_fbank(samples).map_err(|e| anyhow!("fbank: {e}"))?;
-    let (frames, bins) = feats.dim();
-    let data: Vec<f32> = feats.as_standard_layout().iter().copied().collect();
-    let tensor =
-        Tensor::from_array((vec![1i64, frames as i64, bins as i64], data)).map_err(ort_err)?;
+    let (frames, data) = fbank::compute_fbank(samples).context("fbank")?;
+    let tensor = Tensor::from_array((vec![1i64, frames as i64, fbank::NUM_BINS as i64], data))
+        .map_err(ort_err)?;
     let outs = sess.run(ort::inputs!["feats" => tensor]).map_err(ort_err)?;
     let (_, values) = outs["embs"].try_extract_tensor::<f32>().map_err(ort_err)?;
     let mut v = values.to_vec();

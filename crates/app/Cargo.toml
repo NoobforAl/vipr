@@ -9,11 +9,11 @@ publish.workspace = true
 cpal = "0.18"
 dirs = "7.0.0"
 engine = { version = "0.1.0", path = "../engine" }
-gpu-detect = { version = "0.1.0", path = "../gpu-detect" }
+gpu-detect = { version = "0.1.0", path = "../gpu-detect", default-features = false }
 iced = { version = "0.14.0", features = ["svg"] }
 png = "0.18.1"
 rfd = "0.17.2"
-rtrb = "0.3"
+rtrb = "0.4"
 serde_json = "1.0.154"
 sysinfo = "0.40.1"
 

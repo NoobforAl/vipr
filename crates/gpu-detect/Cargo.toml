@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["probe"]
+# Lists non-NVIDIA graphics adapters through wgpu. Only the `detect` tool and engine-cli need it: workers use just
+# the types here, and the GUI runs `detect` as a child process because wgpu in its own process can lose its device.
+probe = ["dep:wgpu"]
+
 [dependencies]
 nvml-wrapper = "0.13.0"
-pollster = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-wgpu = { version = "30.0.1", default-features = false, features = [
+# keep on the same major version as iced's wgpu, so a full workspace build compiles only one copy
+wgpu = { version = "27.0.1", default-features = false, optional = true, features = [
   "vulkan",
   "dx12",
   "metal",
@@ -19,3 +25,4 @@ wgpu = { version = "30.0.1", default-features = false, features = [
 [[bin]]
 name = "detect"
 path = "src/main.rs"
+required-features = ["probe"]

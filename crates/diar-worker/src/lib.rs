@@ -10,6 +10,8 @@
 
 use engine::diar::DiarTurn;
 
+pub mod fbank;
+
 /// Samples per segmentation window (10 s at 16 kHz).
 pub const WINDOW: usize = 160_000;
 /// Samples between two segmentation frames.

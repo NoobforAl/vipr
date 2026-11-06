@@ -41,6 +41,7 @@ pub enum Vendor {
 }
 
 impl Vendor {
+    #[cfg(feature = "probe")]
     fn from_pci(id: u32) -> Self {
         match id & 0xffff {
             0x10de => Vendor::Nvidia,
@@ -90,6 +91,7 @@ pub struct Detection {
 }
 
 /// Probe the machine. Never panics and never needs a GPU; the worst result is `Backend::Cpu`.
+#[cfg(feature = "probe")]
 pub fn detect() -> Detection {
     let mut notes = Vec::new();
     let mut gpus = probe_nvml(&mut notes);
@@ -212,12 +214,11 @@ fn probe_nvml(notes: &mut Vec<String>) -> Vec<GpuInfo> {
     out
 }
 
+#[cfg(feature = "probe")]
 fn probe_wgpu(notes: &mut Vec<String>) -> Vec<GpuInfo> {
     use wgpu::{Backends, DeviceType, Instance};
     let instance = Instance::default();
-    let adapters = pollster::block_on(
-        instance.enumerate_adapters(Backends::VULKAN | Backends::DX12 | Backends::METAL),
-    );
+    let adapters = instance.enumerate_adapters(Backends::VULKAN | Backends::DX12 | Backends::METAL);
     if adapters.is_empty() {
         notes.push("wgpu found no graphics adapters (no Vulkan / DX12 / Metal driver?)".into());
     }
