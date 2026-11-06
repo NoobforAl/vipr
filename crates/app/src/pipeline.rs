@@ -571,14 +571,16 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
             args.extend(["--glossary".into(), s(g)]);
         }
         let res = run_worker(exe, &args, &dir.join("llm-worker.log"), &mut |v| {
-            if v.get("event").and_then(Value::as_str) == Some("progress") {
-                emit(Event::Detail(
+            match v.get("event").and_then(Value::as_str) {
+                // said as soon as the model is ready: the first progress comes only after a whole batch of lines
+                Some("model_loaded") => emit(Event::Detail(
                     "Fixing misheard words and punctuation, a few lines at a time".into(),
-                ));
-                emit(Event::Progress {
+                )),
+                Some("progress") => emit(Event::Progress {
                     step: pct_of(v),
                     overall: overall_progress(&steps, step, pct_of(v)),
-                });
+                }),
+                _ => {}
             }
         });
         match res.and_then(|_| std::fs::read_to_string(&llm_out).map_err(|e| e.to_string())) {

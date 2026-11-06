@@ -812,7 +812,7 @@ fn controls<'a>(
     state: &'a State,
     t: Tokens,
     marks: &'a [Mark],
-    finding_chapters: bool,
+    finding_chapters: Option<f32>,
 ) -> Element<'a, Msg> {
     let playing = !state.paused && !state.finished;
     let (play_icon, status) = if state.finished {
@@ -876,15 +876,15 @@ fn controls<'a>(
         state.chapters.is_empty(),
         state.chapters_stale,
     ) {
-        (true, ..) => "Finding chapters...",
-        (false, true, _) => "Find chapters",
-        (false, false, true) => "Chapters out of date: find again",
-        (false, false, false) => "Find chapters again",
+        (Some(done), ..) => format!("Finding chapters... {}", crate::jobs::percent_text(done)),
+        (None, true, _) => "Find chapters".to_string(),
+        (None, false, true) => "Chapters out of date: find again".to_string(),
+        (None, false, false) => "Find chapters again".to_string(),
     };
     tracks = tracks.push(
         button(label(find_label).size(12))
             .padding([2, 8])
-            .on_press_maybe((!finding_chapters).then_some(Msg::FindChapters))
+            .on_press_maybe(finding_chapters.is_none().then_some(Msg::FindChapters))
             .style(theme::flat(t, false)),
     );
     let chapter_title = chapter_at(&state.chapters, state.position)
@@ -1093,13 +1093,13 @@ pub fn is_playing(state: &State) -> bool {
     state.phase == Phase::Playing
 }
 
-/// `marks` are drawn as ticks on the seek bar. They are owned by `marks_ui`. `finding_chapters` says a chapters run for
-/// this recording is waiting or running.
+/// `marks` are drawn as ticks on the seek bar. They are owned by `marks_ui`. `finding_chapters` says how far a chapters
+/// run for this recording is, when one is waiting or running.
 pub fn view<'a>(
     state: &'a State,
     tokens: Tokens,
     marks: &'a [Mark],
-    finding_chapters: bool,
+    finding_chapters: Option<f32>,
 ) -> Element<'a, Msg> {
     match &state.phase {
         Phase::Idle | Phase::Opening => black(space().into()),
@@ -1618,13 +1618,13 @@ mod tests {
                 phase,
                 ..State::default()
             };
-            drop(view(&s, t, &marks, false));
+            drop(view(&s, t, &marks, None));
         }
         let mut audio = playing_state();
         audio.has_video = false;
         audio.duration = 10.0;
-        drop(view(&audio, t, &marks, false));
+        drop(view(&audio, t, &marks, None));
         let video = playing_state();
-        drop(view(&video, t, &marks, false));
+        drop(view(&video, t, &marks, None));
     }
 }

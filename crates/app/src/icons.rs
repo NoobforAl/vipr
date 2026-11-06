@@ -68,9 +68,9 @@ pub const BOOKMARK: &str = include_str!("../../../assets/icons/phosphor/bookmark
 pub const REFRESH: &str = include_str!("../../../assets/icons/phosphor/arrow-clockwise.svg");
 pub const FOLLOW: &str = include_str!("../../../assets/icons/phosphor/crosshair-simple.svg");
 
-/// Spinner: a faint full ring with a bright quarter arc on top; rotate it to animate.
+/// Spinner: a faint ring with a comet on it, bright at its head and fading along its tail. Rotate it to animate.
 pub const SPINNER: &str = icon_src!(
-    r#"<circle cx="12" cy="12" r="9" stroke-opacity="0.22"/><path d="M12 3a9 9 0 0 1 9 9" stroke-width="2.8"/>"#
+    r#"<circle cx="12" cy="12" r="9" stroke-opacity="0.15" stroke-width="2.6"/><g stroke-width="2.6"><path d="M3 12a9 9 0 0 1 2.64-6.36" stroke-opacity="0.2" stroke-linecap="butt"/><path d="M5.64 5.64A9 9 0 0 1 12 3" stroke-opacity="0.45" stroke-linecap="butt"/><path d="M12 3a9 9 0 0 1 6.36 2.64" stroke-opacity="0.72" stroke-linecap="butt"/><path d="M18.36 5.64A9 9 0 0 1 21 12"/></g>"#
 );
 
 // Window buttons (minimize / maximize / restore / close). A separate 10 x 10 grid with 1 px strokes:
@@ -103,7 +103,12 @@ pub fn icon<'a, M: 'a>(src: &'static str, size: f32, color: Color) -> Element<'a
         .into()
 }
 
-/// A spinner arc turned by `angle` radians (call again with a new angle to animate it).
+/// How far a spinner has turned after `clock` seconds, in radians.
+pub fn spin_angle(clock: f32) -> f32 {
+    (clock * 7.0) % std::f32::consts::TAU
+}
+
+/// A spinner turned by `angle` radians (call again with a new angle to animate it).
 pub fn spinner<'a, M: 'a>(angle: f32, size: f32, color: Color) -> Element<'a, M> {
     svg(svg::Handle::from_memory(SPINNER.as_bytes()))
         .width(Length::Fixed(size))

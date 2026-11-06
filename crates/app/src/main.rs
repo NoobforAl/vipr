@@ -13,6 +13,7 @@ mod out;
 mod pipeline;
 mod player;
 mod profiles_ui;
+mod progress;
 mod review_ui;
 mod saver;
 mod theme;
@@ -240,6 +241,8 @@ struct Job {
     detail: String,
     step_progress: f32,
     progress: f32,
+    /// `progress` as drawn: it glides there.
+    shown_progress: f32,
     started: Option<Instant>,
     cancelled: bool,
     notes: Vec<String>,
@@ -268,6 +271,7 @@ impl Job {
             detail: String::new(),
             step_progress: 0.0,
             progress: 0.0,
+            shown_progress: 0.0,
             started: None,
             cancelled: false,
             notes: Vec::new(),
@@ -660,6 +664,7 @@ impl App {
             || self.notice.is_some()
             || self.notices.iter().any(|n| n.expires.is_some())
             || self.ffmpeg_dl.is_some()
+            || jobs::busy(&self.queue)
     }
 
     /// Rotating arc, for "working on it" states.
@@ -948,6 +953,7 @@ impl App {
         job.detail = "Starting".into();
         job.step_progress = 0.0;
         job.progress = 0.0;
+        job.shown_progress = 0.0;
         job.started = Some(Instant::now());
         job.cancelled = false;
         job.notes.clear();
@@ -1031,7 +1037,13 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
-                self.spin = (self.epoch.elapsed().as_secs_f32() * 7.0) % std::f32::consts::TAU;
+                self.spin = icons::spin_angle(self.epoch.elapsed().as_secs_f32());
+                jobs::tick(&mut self.queue);
+                if let Some(id) = self.running
+                    && let Some(j) = self.job_mut(id)
+                {
+                    j.shown_progress = progress::approach(j.shown_progress, j.progress);
+                }
                 if self
                     .copied
                     .is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(1600))
@@ -2148,7 +2160,7 @@ impl App {
         let mut page = column![
             header,
             open_saved,
-            jobs::view(&self.queue, t).map(Message::Jobs)
+            jobs::view(&self.queue, t, self.epoch.elapsed().as_secs_f32()).map(Message::Jobs)
         ]
         .spacing(18);
 
@@ -2545,7 +2557,7 @@ impl App {
         id
     }
 
-    /// Numbered steps, the current step's own progress bar, what it is doing, and time / system usage.
+    /// Numbered steps, one bar for the whole run, what it is doing, and time / system usage.
     fn running_panel<'a>(&'a self, j: &'a Job) -> Element<'a, Message> {
         let t = self.tokens;
         let total = j.steps.len().max(1);
@@ -2616,14 +2628,11 @@ impl App {
         let elapsed = j.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
         let eta = (j.progress > 0.04 && j.progress < 1.0)
             .then(|| (elapsed as f32 * (1.0 - j.progress) / j.progress) as u64);
-        let mut meta = format!(
-            "Overall {:.0}%  -  {} elapsed",
-            j.progress * 100.0,
-            mmss(elapsed)
-        );
+        let mut meta = format!("{} elapsed", mmss(elapsed));
         if let Some(e) = eta {
-            meta.push_str(&format!("  -  about {} left", mmss(e)));
+            meta.push_str(&format!("  -  {}", time_left(e)));
         }
+        let clock = self.epoch.elapsed().as_secs_f32();
 
         let mut col = column![
             stepper,
@@ -2638,8 +2647,8 @@ impl App {
                 .font(semibold())
                 .color(t.text)
                 .width(Length::Fill),
-                text(format!("{:.0}%", j.step_progress * 100.0))
-                    .size(14)
+                text(jobs::percent_text(j.shown_progress))
+                    .size(16)
                     .font(semibold())
                     .color(t.accent),
                 button(
@@ -2656,10 +2665,7 @@ impl App {
             ]
             .spacing(10)
             .align_y(Alignment::Center),
-            progress_bar(0.0..=1.0, j.step_progress)
-                .length(Length::Fill)
-                .girth(8)
-                .style(theme::bar(t)),
+            progress::bar(j.shown_progress, clock, 10.0, t),
         ]
         .spacing(10);
         let detail = if j.detail.is_empty() {
@@ -2669,8 +2675,9 @@ impl App {
         };
         col = col.push(
             row![
-                self.spinner(14.0, t.accent),
-                text(detail).size(13).color(t.muted)
+                self.spinner(18.0, t.accent),
+                text(detail).size(13).color(t.muted).width(Length::Fill),
+                text(step_share(j.step_progress)).size(12).color(t.faint),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -3003,7 +3010,8 @@ impl App {
                     header,
                     self.result_actions(id, tr),
                     legend,
-                    jobs::view(&self.queue, t).map(Message::Jobs)
+                    jobs::view(&self.queue, t, self.epoch.elapsed().as_secs_f32())
+                        .map(Message::Jobs)
                 ]
                 .spacing(14)
             )
@@ -3928,12 +3936,32 @@ fn ffmpeg_stream() -> impl Stream<Item = FfmpegEvent> {
 }
 
 /// A tick every 70 ms for spinner animation; the thread ends when the subscription is dropped.
+/// A rough figure on purpose: the estimate moves around, and a clock counting in seconds would jitter with it.
+fn time_left(seconds: u64) -> String {
+    match seconds {
+        0..=59 => "less than a minute left".to_string(),
+        60..=119 => "about a minute left".to_string(),
+        _ => format!("about {} minutes left", (seconds + 30) / 60),
+    }
+}
+
+/// How far the current step is, next to what it is doing.
+fn step_share(fraction: f32) -> String {
+    let percent = jobs::percent_text(fraction);
+    if percent.is_empty() {
+        percent
+    } else {
+        format!("{percent} of this step")
+    }
+}
+
 fn tick_stream() -> impl Stream<Item = ()> {
     iced::stream::channel(2, async |mut out: mpsc::Sender<()>| {
         let (tx, mut rx) = mpsc::unbounded::<()>();
         std::thread::spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_millis(70));
+                // often enough for the spinner and progress bars to move smoothly
+                std::thread::sleep(Duration::from_millis(33));
                 if tx.unbounded_send(()).is_err() {
                     break;
                 }
@@ -4060,6 +4088,14 @@ fn download_stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_time_left_stays_a_rough_figure() {
+        assert_eq!(super::time_left(20), "less than a minute left");
+        assert_eq!(super::time_left(90), "about a minute left");
+        assert_eq!(super::time_left(200), "about 3 minutes left");
+        assert_eq!(super::time_left(3600), "about 60 minutes left");
+    }
+
     #[test]
     fn translation_uses_its_own_model_only_once_one_is_chosen() {
         assert_eq!(super::translate_role(false), super::Role::Llm);

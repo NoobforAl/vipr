@@ -26,12 +26,14 @@ use engine::subalign::{align, best_offset};
 use engine::transcript::Transcript;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
-use iced::widget::{button, column, container, progress_bar, row, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Element, Length, Task};
 use serde_json::Value;
 
+use crate::icons;
 use crate::out::{JobKind, JobRef, Out, Page, TranslateSource};
 use crate::pipeline;
+use crate::progress;
 use crate::theme::{self, Tokens};
 
 /// Text of the error a run ends with when it was cancelled (`pipeline::run_worker`).
@@ -50,6 +52,8 @@ struct Running {
     stem: String,
     detail: String,
     progress: f32,
+    /// `progress` as drawn: it glides there.
+    shown: f32,
     cancelling: bool,
 }
 
@@ -121,9 +125,19 @@ pub fn enqueue(state: &mut State, kind: JobKind) {
     }
 }
 
-/// This run is waiting or running.
-pub fn pending(state: &State, kind: &JobKind) -> bool {
-    state.running.as_ref().is_some_and(|r| r.kind == *kind) || state.queue.contains(kind)
+/// How far along this run is, 0..1, when it is waiting or running. `None` otherwise.
+pub fn pending(state: &State, kind: &JobKind) -> Option<f32> {
+    match &state.running {
+        Some(r) if r.kind == *kind => Some(r.shown),
+        _ => state.queue.contains(kind).then_some(0.0),
+    }
+}
+
+/// One step of the animation, while [`busy`].
+pub fn tick(state: &mut State) {
+    if let Some(r) = &mut state.running {
+        r.shown = progress::approach(r.shown, r.progress);
+    }
 }
 
 /// Takes the next queued run.
@@ -150,6 +164,7 @@ pub fn start(state: &mut State, kind: JobKind, context: JobContext) -> (Task<Msg
         stem: job.paths.stem.clone(),
         detail: "Starting".into(),
         progress: 0.0,
+        shown: 0.0,
         cancelling: false,
     });
     pipeline::reset_cancel();
@@ -262,8 +277,18 @@ fn chapters_notice(count: usize, failed_windows: usize) -> String {
     notice
 }
 
+/// `43%`. Empty until there is a first figure, since "0%" reads as stuck while a model loads.
+pub fn percent_text(fraction: f32) -> String {
+    let percent = (fraction * 100.0).round();
+    if percent < 1.0 {
+        String::new()
+    } else {
+        format!("{percent:.0}%")
+    }
+}
+
 /// The running and waiting runs. Empty when there are none.
-pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
+pub fn view(state: &State, t: Tokens, clock: f32) -> Element<'_, Msg> {
     let mut list = column![].spacing(8);
     if let Some(r) = &state.running {
         let mut cancel = button(text("Cancel").size(12)).style(theme::outline_btn(t));
@@ -274,18 +299,20 @@ pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
         list = list
             .push(
                 row![
+                    icons::spinner(icons::spin_angle(clock), 18.0, t.accent),
                     column![
                         text(title).size(13).color(t.text),
                         text(r.detail.as_str()).size(12).color(t.muted),
                     ]
                     .spacing(2)
                     .width(Length::Fill),
+                    text(percent_text(r.shown)).size(14).color(t.accent),
                     cancel,
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center),
             )
-            .push(progress_bar(0.0..=1.0, r.progress).style(theme::bar(t)));
+            .push(progress::bar(r.shown, clock, 8.0, t));
     }
     for (index, kind) in state.queue.iter().enumerate() {
         list = list.push(
@@ -1005,6 +1032,7 @@ mod tests {
             stem: "a".into(),
             detail: String::new(),
             progress: 0.0,
+            shown: 0.0,
             cancelling: false,
         }
     }
@@ -1013,15 +1041,24 @@ mod tests {
     fn a_chapters_run_counts_as_pending_only_for_its_own_recording() {
         let mine = JobKind::Chapters { job: 1 };
         let mut state = State::default();
-        assert!(!pending(&state, &mine));
+        assert_eq!(pending(&state, &mine), None);
         enqueue(&mut state, mine.clone());
-        assert!(pending(&state, &mine));
-        assert!(!pending(&state, &JobKind::Chapters { job: 2 }));
+        assert_eq!(pending(&state, &mine), Some(0.0));
+        assert_eq!(pending(&state, &JobKind::Chapters { job: 2 }), None);
         let _ = next(&mut state);
-        assert!(
-            !pending(&state, &mine),
-            "taken off the queue, not yet running"
+        assert_eq!(
+            pending(&state, &mine),
+            None,
+            "off the queue, not yet running"
         );
+    }
+
+    #[test]
+    fn a_percentage_only_shows_once_there_is_one() {
+        assert_eq!(percent_text(0.0), "");
+        assert_eq!(percent_text(0.004), "");
+        assert_eq!(percent_text(0.43), "43%");
+        assert_eq!(percent_text(1.0), "100%");
     }
 
     #[test]
