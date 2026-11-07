@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use engine::chapters::transcript_lines;
 use engine::compare::{MAX_REASON_CHARS, check_merged, needs_llm};
+use engine::cuts::CutsFile;
 use engine::fsio;
 use engine::lang::clean_separators;
 use engine::profiles::Profile;
@@ -94,6 +95,9 @@ pub enum Finished {
     },
     Exported {
         path: PathBuf,
+        /// Parts left out, and how long they were together.
+        cuts: usize,
+        cut_seconds: u64,
     },
     Chapters {
         count: usize,
@@ -134,6 +138,15 @@ pub fn pending(state: &State, kind: &JobKind) -> Option<f32> {
     match &state.running {
         Some(r) if r.kind == *kind => Some(r.shown),
         _ => state.queue.contains(kind).then_some(0.0),
+    }
+}
+
+/// How far an export of `job` is, 0..1, when one is waiting or running.
+pub fn export_progress(state: &State, job: u64) -> Option<f32> {
+    let is_export = |kind: &JobKind| matches!(kind, JobKind::Export { job: j, .. } if *j == job);
+    match &state.running {
+        Some(r) if is_export(&r.kind) => Some(r.shown),
+        _ => state.queue.iter().any(is_export).then_some(0.0),
     }
 }
 
@@ -260,15 +273,24 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             );
             (Task::done(Msg::Tell(notice)), open)
         }
-        Finished::Exported { path } => {
+        Finished::Exported {
+            path,
+            cuts,
+            cut_seconds,
+        } => {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            (
-                Task::none(),
-                Out::Notice(format!("Saved the video with subtitles: {name}")),
-            )
+            let mut notice = format!("Saved the video with subtitles: {name}");
+            if cuts > 0 {
+                notice.push_str(&format!(
+                    ". {cuts} cut {} left out, {} shorter.",
+                    if cuts == 1 { "part" } else { "parts" },
+                    engine::transcript::clock(cut_seconds as f64)
+                ));
+            }
+            (Task::none(), Out::Notice(notice))
         }
         Finished::Chapters {
             count,
@@ -536,20 +558,35 @@ fn export(
             pipeline::translation_srt(&file)
         }
     };
-    emit(RunEvent::Detail(
-        "Putting the subtitles on the video".into(),
-    ));
+    // a damaged cuts file would cut the wrong parts, so it stops the export instead of being ignored
+    let cuts_path = paths.cuts();
+    let cuts = if cuts_path.is_file() {
+        let file: CutsFile = fsio::load_json(&cuts_path).map_err(|e| load_error("the cuts", e))?;
+        engine::cuts::normalize(&file.cuts, t.audio_seconds)
+    } else {
+        Vec::new()
+    };
+    emit(RunEvent::Detail(if cuts.is_empty() {
+        "Putting the subtitles on the video".into()
+    } else {
+        format!(
+            "Putting the subtitles on the video and leaving out {} cut parts",
+            cuts.len()
+        )
+    }));
     pipeline::burn_subtitles(
         &ffmpeg,
         &run.job.media,
         &srt,
         (&paths.dir, out),
-        t.audio_seconds,
+        (t.audio_seconds, &cuts),
         &paths.dir.join("export.log"),
         &mut |done| emit(RunEvent::Progress(done)),
     )?;
     Ok(Finished::Exported {
         path: out.to_path_buf(),
+        cuts: cuts.len(),
+        cut_seconds: engine::cuts::removed(&cuts).round() as u64,
     })
 }
 

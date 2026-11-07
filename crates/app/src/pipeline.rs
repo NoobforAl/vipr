@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use engine::cuts::Cut;
 use engine::fsio;
 use engine::profiles::{GlossaryTerm, Profile};
 use engine::project::{CueStatus, ProjectMeta, ProjectPaths, TimedText, TranslationFile};
@@ -689,11 +690,24 @@ pub fn burn_subtitles(
     media: &Path,
     srt: &str,
     dirs: (&Path, &Path),
-    duration: f64,
+    (duration, cuts): (f64, &[Cut]),
     log: &Path,
     on_progress: &mut dyn FnMut(f32),
 ) -> Result<(), String> {
     let (work_dir, out) = dirs;
+    let draw = format!("subtitles={BURN_SUBTITLES}:force_style='{BURN_STYLE}'");
+    // without cuts every sound track is kept; cutting joins the parts of the picture and the first sound track
+    let (filter, out_seconds): (Vec<String>, f64) = if cuts.is_empty() {
+        let args = ["-map", "0:v:0", "-map", "0:a?", "-vf", &draw];
+        (args.map(String::from).to_vec(), duration)
+    } else {
+        let graph = engine::cuts::filter_complex(&draw, &engine::cuts::kept(cuts, duration), true);
+        let args = ["-filter_complex", &graph, "-map", "[v]", "-map", "[a]"];
+        (
+            args.map(String::from).to_vec(),
+            duration - engine::cuts::removed(cuts),
+        )
+    };
     let subs = work_dir.join(BURN_SUBTITLES);
     fsio::write_atomic(&subs, srt.as_bytes())
         .map_err(|e| format!("cannot write the subtitles: {e}"))?;
@@ -706,10 +720,10 @@ pub fn burn_subtitles(
     for encoder in encoders {
         result = run_ffmpeg(
             ffmpeg,
-            media,
+            (media, &filter),
             encoder,
             (work_dir, &part),
-            duration,
+            out_seconds,
             log,
             on_progress,
         );
@@ -730,7 +744,7 @@ pub fn burn_subtitles(
 
 fn run_ffmpeg(
     ffmpeg: &Path,
-    media: &Path,
+    (media, filter): (&Path, &[String]),
     encoder: &[&str],
     dirs: (&Path, &Path),
     duration: f64,
@@ -742,10 +756,7 @@ fn run_ffmpeg(
     cmd.current_dir(work_dir)
         .args(["-hide_banner", "-nostdin", "-y", "-i"])
         .arg(media)
-        .args(["-map", "0:v:0", "-map", "0:a?", "-vf"])
-        .arg(format!(
-            "subtitles={BURN_SUBTITLES}:force_style='{BURN_STYLE}'"
-        ))
+        .args(filter)
         .args(encoder)
         .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"])
         .args([

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Acquire;
 use std::time::{Duration, Instant};
 
+use engine::cuts::{self, Cut, CutsFile};
 use engine::marks::{Mark, MarkKind};
 use engine::project::Chapter;
 use iced::futures::channel::{mpsc, oneshot};
@@ -94,6 +95,12 @@ pub struct State {
     duration: f64,
     tracks: Vec<Track>,
     active: usize,
+    /// Parts to leave out of an export, in order. Playback skips them.
+    cuts: Vec<Cut>,
+    /// Where a cut being made starts, until its end is set.
+    cut_in: Option<f64>,
+    /// The cuts file couldn't be read, so cuts can't be changed: saving would replace it.
+    cuts_locked: bool,
     /// In time order. Each lasts until the next one.
     chapters: Vec<Chapter>,
     chapters_stale: bool,
@@ -156,6 +163,9 @@ impl Default for State {
             undim_since: None,
             chapters: Vec::new(),
             chapters_stale: false,
+            cuts: Vec::new(),
+            cut_in: None,
+            cuts_locked: false,
         }
     }
 }
@@ -167,6 +177,8 @@ pub struct Loaded {
     media_found: bool,
     probe: Probe,
     set: TrackSet,
+    /// `Err` when the cuts file is there but can't be read.
+    cuts: Result<Vec<Cut>, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +201,15 @@ pub enum Msg {
     /// Read the tracks again, after a translation finishes.
     ReloadTracks,
     TracksLoaded(u64, Option<Arc<TrackSet>>),
+    /// A cut starts here (I).
+    CutStart,
+    /// The cut started with `CutStart` ends here (O).
+    CutEnd,
+    /// Forget the cut being made.
+    CutCancel,
+    RemoveCut(usize),
+    /// Save the video with the subtitles on show, leaving out the cuts.
+    ExportVideo,
     /// Ask the AI where the topic changes.
     FindChapters,
     /// Try opening the same job again, after ffmpeg arrives or the media comes back.
@@ -234,7 +255,17 @@ fn load(job: &JobRef) -> Loaded {
         media_found,
         probe,
         set: load_tracks(&job.paths),
+        cuts: load_cuts(&job.paths.cuts()),
     }
+}
+
+fn load_cuts(path: &std::path::Path) -> Result<Vec<Cut>, String> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    engine::fsio::load_json::<CutsFile>(path)
+        .map(|f| f.cuts)
+        .map_err(|_| "The cuts couldn't be read, so they can't be changed here.".to_string())
 }
 
 fn start_loading(state: &mut State) -> Task<Msg> {
@@ -407,6 +438,15 @@ fn tick(state: &mut State) {
     }
     let clock = shared.clock.now();
     state.position = state.seek_target.unwrap_or(clock);
+    // cuts are skipped while playing, so what plays is what an export will hold
+    if !state.paused
+        && !state.finished
+        && state.seek_target.is_none()
+        && let Some(cut) = cuts::cut_at(&state.cuts, state.position).copied()
+    {
+        seek(state, cut.end);
+        return;
+    }
 
     if session.take_audio_failure() {
         state
@@ -536,6 +576,30 @@ fn handle(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
             state.chapters = set.chapters.clone();
             state.chapters_stale = set.chapters_stale;
         }
+        Msg::CutStart if !state.cuts_locked => state.cut_in = Some(state.position),
+        Msg::CutEnd => {
+            if let Some(from) = state.cut_in.take() {
+                let to = state.position;
+                state.cuts.push(Cut {
+                    start: from.min(to),
+                    end: from.max(to),
+                });
+                state.cuts = cuts::normalize(&state.cuts, state.duration);
+                save_cuts(state);
+            }
+        }
+        Msg::CutCancel => state.cut_in = None,
+        Msg::RemoveCut(i) if i < state.cuts.len() && !state.cuts_locked => {
+            state.cuts.remove(i);
+            save_cuts(state);
+        }
+        Msg::CutStart | Msg::RemoveCut(_) => {}
+        Msg::ExportVideo => {
+            if let Some(job) = &state.job {
+                let lang = state.tracks.get(state.active).and_then(|t| t.code.clone());
+                return (task, Out::ExportVideo { job: job.id, lang });
+            }
+        }
         Msg::FindChapters => {
             if let Some(job) = &state.job {
                 return (task, Out::Enqueue(JobKind::Chapters { job: job.id }));
@@ -560,11 +624,34 @@ fn set_tracks(state: &mut State, tracks: Vec<Track>) {
     state.tracks = tracks;
 }
 
+/// Writes the cuts on the save thread, so a slow disk can't freeze the window.
+fn save_cuts(state: &State) {
+    if let Some(job) = &state.job {
+        let path = job.paths.cuts();
+        let file = CutsFile::new(state.cuts.clone());
+        crate::saver::run(move || {
+            let _ = engine::fsio::save_json(&path, &file);
+        });
+    }
+}
+
 fn on_loaded(state: &mut State, loaded: Option<Arc<Loaded>>) -> Task<Msg> {
     let (Some(loaded), Some(job)) = (loaded, state.job.clone()) else {
         state.phase = Phase::Failed("This file couldn't be opened.".to_string());
         return Task::none();
     };
+    state.cut_in = None;
+    match &loaded.cuts {
+        Ok(cuts) => {
+            state.cuts = cuts.clone();
+            state.cuts_locked = false;
+        }
+        Err(problem) => {
+            state.cuts = Vec::new();
+            state.cuts_locked = true;
+            state.notices.push(problem.clone());
+        }
+    }
     state.notices = loaded.set.problems.clone();
     set_tracks(state, loaded.set.tracks.clone());
     state.chapters = loaded.set.chapters.clone();
@@ -701,7 +788,109 @@ fn seek_bar<'a>(state: &'a State, t: Tokens, marks: &'a [Mark]) -> Element<'a, M
         );
     }
     line = line.push(gap(tail));
-    stack![bar, line].width(Length::Fill).into()
+    let mut bands = row![]
+        .height(SEEK_BAR_HEIGHT)
+        .align_y(Alignment::Center)
+        .padding([0.0, SLIDER_INSET]);
+    let (pieces, rest) = cut_layout(&state.cuts, state.cut_in, state.duration);
+    for (before, width) in pieces {
+        bands = bands.push(gap(before));
+        bands = bands.push(
+            container(space())
+                .width(Length::FillPortion(width))
+                .height(SEEK_BAR_HEIGHT)
+                .style(theme::rounded_fill(theme::with_alpha(t.bad, 0.5), 0.0)),
+        );
+    }
+    bands = bands.push(gap(rest));
+    stack![bar, line, bands].width(Length::Fill).into()
+}
+
+/// Where to draw the cuts on the seek bar: for each, the gap before it and its width, as portions, then what is left
+/// after the last. A cut being made shows from where it starts to where playback is.
+fn cut_layout(cuts: &[Cut], cut_in: Option<f64>, duration: f64) -> (Vec<(u16, u16)>, u16) {
+    if duration <= 0.0 {
+        return (Vec::new(), TICK_SCALE as u16);
+    }
+    let mut ranges: Vec<(f64, f64)> = cuts.iter().map(|c| (c.start, c.end)).collect();
+    if let Some(from) = cut_in {
+        ranges.push((from, from));
+    }
+    ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let at = |t: f64| ((t / duration).clamp(0.0, 1.0) * TICK_SCALE as f64).round() as u32;
+    let mut last = 0;
+    let mut pieces = Vec::new();
+    for (start, end) in ranges {
+        let (s, e) = (at(start).max(last), at(end).max(at(start)));
+        let s = s.min(TICK_SCALE);
+        // a cut too short to see, or one just started, still gets a visible sliver
+        let e = e.max(s + 8).min(TICK_SCALE).max(s);
+        if e > s {
+            pieces.push(((s - last) as u16, (e - s) as u16));
+            last = e;
+        }
+    }
+    (pieces, (TICK_SCALE - last) as u16)
+}
+
+/// The cuts as a row of chips: click one to go there, the cross to take it back. Nothing without cuts.
+fn cut_list<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
+    if state.cuts.is_empty() && state.cut_in.is_none() {
+        return None;
+    }
+    let chip = |text: String, go: f64, remove: Msg| -> Element<'a, Msg> {
+        container(
+            row![
+                button(label(text).size(11).color(t.text))
+                    .padding([2, 6])
+                    .style(theme::ghost(t))
+                    .on_press(Msg::SeekTo(go)),
+                button(icons::icon(icons::X, 10.0, t.muted))
+                    .padding([3, 4])
+                    .style(theme::ghost(t))
+                    .on_press(remove),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .style(theme::chip(t.bad))
+        .into()
+    };
+    let mut items: Vec<Element<'a, Msg>> = vec![label("Cuts").size(12).color(t.muted).into()];
+    for (i, c) in state.cuts.iter().enumerate() {
+        items.push(chip(
+            format!("{} - {}", clock_text(c.start), clock_text(c.end)),
+            c.start,
+            Msg::RemoveCut(i),
+        ));
+    }
+    if let Some(from) = state.cut_in {
+        items.push(chip(
+            format!("{} - ... (press O)", clock_text(from)),
+            from,
+            Msg::CutCancel,
+        ));
+    }
+    if !state.cuts.is_empty() {
+        let removed = cuts::removed(&state.cuts);
+        items.push(
+            label(format!(
+                "{} left out, the export is {}",
+                clock_text(removed),
+                clock_text((state.duration - removed).max(0.0))
+            ))
+            .size(12)
+            .color(t.faint)
+            .into(),
+        );
+    }
+    Some(
+        row(items)
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .wrap()
+            .vertical_spacing(4)
+            .into(),
+    )
 }
 
 /// The share of the strip each chapter gets. Even a tiny chapter stays something to click.
@@ -812,7 +1001,7 @@ fn controls<'a>(
     state: &'a State,
     t: Tokens,
     marks: &'a [Mark],
-    finding_chapters: Option<f32>,
+    (finding_chapters, exporting): (Option<f32>, Option<f32>),
 ) -> Element<'a, Msg> {
     let playing = !state.paused && !state.finished;
     let (play_icon, status) = if state.finished {
@@ -840,6 +1029,15 @@ fn controls<'a>(
         tool(icons::REWIND, 18.0, Msg::Nudge(-NUDGE_SECS), t),
         tool(icons::FAST_FORWARD, 18.0, Msg::Nudge(NUDGE_SECS), t),
         tool(icons::SKIP_FORWARD, 18.0, Msg::NextLine, t),
+        space().width(12),
+        button(label("Cut start (I)").size(12))
+            .padding([4, 8])
+            .style(theme::flat(t, false))
+            .on_press_maybe((!state.cuts_locked).then_some(Msg::CutStart)),
+        button(label("Cut end (O)").size(12))
+            .padding([4, 8])
+            .style(theme::flat(t, state.cut_in.is_some()))
+            .on_press_maybe(state.cut_in.is_some().then_some(Msg::CutEnd)),
         space::horizontal(),
         volume_box(state, t),
     ]
@@ -885,6 +1083,16 @@ fn controls<'a>(
         button(label(find_label).size(12))
             .padding([2, 8])
             .on_press_maybe(finding_chapters.is_none().then_some(Msg::FindChapters))
+            .style(theme::flat(t, false)),
+    );
+    let export_label = match exporting {
+        Some(done) => format!("Exporting... {}", crate::jobs::percent_text(done)),
+        None => "Export video".to_string(),
+    };
+    tracks = tracks.push(
+        button(label(export_label).size(12))
+            .padding([2, 8])
+            .on_press_maybe(exporting.is_none().then_some(Msg::ExportVideo))
             .style(theme::flat(t, false)),
     );
     let chapter_title = chapter_at(&state.chapters, state.position)
@@ -934,6 +1142,7 @@ fn controls<'a>(
     column![
         container(
             col.push(chapter_strip(state, t))
+                .push(cut_list(state, t))
                 .push(seek_bar(state, t, marks))
                 .push(transport),
         )
@@ -1099,7 +1308,7 @@ pub fn view<'a>(
     state: &'a State,
     tokens: Tokens,
     marks: &'a [Mark],
-    finding_chapters: Option<f32>,
+    jobs: (Option<f32>, Option<f32>),
 ) -> Element<'a, Msg> {
     match &state.phase {
         Phase::Idle | Phase::Opening => black(space().into()),
@@ -1115,7 +1324,7 @@ pub fn view<'a>(
             } else {
                 transcript_area(state, tokens)
             };
-            column![main, controls(state, tokens, marks, finding_chapters)]
+            column![main, controls(state, tokens, marks, jobs)]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -1182,6 +1391,12 @@ pub fn key(state: &State, key: &Key, mods: Modifiers) -> Option<Msg> {
         Key::Character(c) if c.eq_ignore_ascii_case("s") && state.tracks.len() > 1 => {
             Some(Msg::NextTrack)
         }
+        Key::Character(c) if c.eq_ignore_ascii_case("i") && !state.cuts_locked => {
+            Some(Msg::CutStart)
+        }
+        Key::Character(c) if c.eq_ignore_ascii_case("o") && state.cut_in.is_some() => {
+            Some(Msg::CutEnd)
+        }
         _ => None,
     }
 }
@@ -1224,6 +1439,31 @@ mod tests {
             start,
             title: "t".to_string(),
         }
+    }
+
+    #[test]
+    fn cuts_take_their_share_of_the_bar_and_a_tiny_one_stays_visible() {
+        let cuts = [
+            Cut {
+                start: 100.0,
+                end: 200.0,
+            },
+            Cut {
+                start: 500.0,
+                end: 500.01,
+            },
+        ];
+        let (pieces, rest) = cut_layout(&cuts, None, 1000.0);
+        assert_eq!(pieces[0], (1000, 1000));
+        assert_eq!(pieces[1].1, 8, "a sliver, not nothing");
+        let used: u32 = pieces
+            .iter()
+            .map(|(g, w)| u32::from(*g) + u32::from(*w))
+            .sum();
+        assert_eq!(used + u32::from(rest), TICK_SCALE);
+        assert_eq!(cut_layout(&cuts, None, 0.0).0, Vec::new());
+        // one just started shows where it begins
+        assert_eq!(cut_layout(&[], Some(250.0), 1000.0).0, [(2500, 8)]);
     }
 
     #[test]
@@ -1274,10 +1514,12 @@ mod tests {
             surface_seen: true,
             tracks: vec![
                 Track {
+                    code: None,
                     label: "Original".to_string(),
                     cues: vec![],
                 },
                 Track {
+                    code: None,
                     label: "Persian".to_string(),
                     cues: vec![],
                 },
@@ -1346,6 +1588,20 @@ mod tests {
                 "{c}"
             );
         }
+        assert!(matches!(
+            key(&s, &Key::Character("i".into()), none),
+            Some(Msg::CutStart)
+        ));
+        assert!(
+            key(&s, &Key::Character("o".into()), none).is_none(),
+            "no cut has started"
+        );
+        let mut started = playing_state();
+        started.cut_in = Some(1.0);
+        assert!(matches!(
+            key(&started, &Key::Character("O".into()), none),
+            Some(Msg::CutEnd)
+        ));
         // M and F belong to marks_ui
         assert!(key(&s, &Key::Character("m".into()), none).is_none());
         assert!(key(&s, &Key::Character("f".into()), none).is_none());
@@ -1378,6 +1634,7 @@ mod tests {
         let mut s = playing_state();
         s.active = 1;
         let new = |label: &str| Track {
+            code: None,
             label: label.to_string(),
             cues: vec![],
         };
@@ -1389,6 +1646,7 @@ mod tests {
 
     fn timed_cues(starts: &[f64]) -> Track {
         Track {
+            code: None,
             label: "T".to_string(),
             cues: starts
                 .iter()
@@ -1556,6 +1814,7 @@ mod tests {
             media_found: found,
             probe,
             set: TrackSet::default(),
+            cuts: Ok(Vec::new()),
         }
     }
 
@@ -1618,13 +1877,13 @@ mod tests {
                 phase,
                 ..State::default()
             };
-            drop(view(&s, t, &marks, None));
+            drop(view(&s, t, &marks, (None, None)));
         }
         let mut audio = playing_state();
         audio.has_video = false;
         audio.duration = 10.0;
-        drop(view(&audio, t, &marks, None));
+        drop(view(&audio, t, &marks, (None, None)));
         let video = playing_state();
-        drop(view(&video, t, &marks, None));
+        drop(view(&video, t, &marks, (None, None)));
     }
 }

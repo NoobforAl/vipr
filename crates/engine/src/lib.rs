@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod chapters;
 pub mod compare;
+pub mod cuts;
 pub mod diar;
 pub mod diff;
 pub mod download;

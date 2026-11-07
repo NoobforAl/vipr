@@ -792,6 +792,7 @@ impl App {
                 self.alert(&line);
                 Task::none()
             }
+            Out::ExportVideo { job, lang } => self.ask_export(job, lang),
         }
     }
 
@@ -933,7 +934,13 @@ impl App {
         }
         let mut video = column![
             container(top).width(Length::Fill).style(theme::strip(t)),
-            player::view(&self.player, t, marks, finding_chapters).map(Message::Player)
+            player::view(
+                &self.player,
+                t,
+                marks,
+                (finding_chapters, jobs::export_progress(&self.queue, id)),
+            )
+            .map(Message::Player)
         ]
         .width(Length::Fill)
         .height(Length::Fill);
@@ -1493,28 +1500,11 @@ impl App {
                 Task::none()
             }
             Message::ExportVideo(id) => {
-                let Some(job) = self.job_ref(id) else {
-                    return Task::none();
-                };
-                if !job.media.is_file() {
-                    self.alert("The video for this result is not where it was. Open the player once to find it again.");
-                    return Task::none();
-                }
                 let lang = self
                     .viewing
                     .and_then(|i| self.translations.get(i))
                     .map(|l| l.code.clone());
-                let name = format!(
-                    "{} - {} subtitles.mp4",
-                    job.paths.stem,
-                    self.viewing_label().unwrap_or("original")
-                );
-                let dir = job.media.parent().map(std::path::Path::to_path_buf);
-                Task::perform(pick_export(dir, name), move |path| Message::ExportTo {
-                    job: id,
-                    lang: lang.clone(),
-                    path,
-                })
+                self.ask_export(id, lang)
             }
             Message::ExportTo {
                 job,
@@ -1873,6 +1863,27 @@ impl App {
         }
         self.sync_translate_box();
         task
+    }
+
+    /// Asks where to save job `id`'s video with the subtitles of `lang` (`None`: the original) drawn on, then queues it.
+    fn ask_export(&mut self, id: u64, lang: Option<String>) -> Task<Message> {
+        let Some(job) = self.job_ref(id) else {
+            return Task::none();
+        };
+        if !job.media.is_file() {
+            self.alert("The video for this result is not where it was. Open the player once to find it again.");
+            return Task::none();
+        }
+        let label = lang
+            .as_deref()
+            .map_or_else(|| "original".to_string(), jobs::language_name);
+        let name = format!("{} - {label} subtitles.mp4", job.paths.stem);
+        let dir = job.media.parent().map(std::path::Path::to_path_buf);
+        Task::perform(pick_export(dir, name), move |path| Message::ExportTo {
+            job: id,
+            lang: lang.clone(),
+            path,
+        })
     }
 
     /// The translation on show, one text per utterance. `None` when the page shows the original.

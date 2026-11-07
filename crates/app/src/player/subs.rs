@@ -75,6 +75,8 @@ impl SubCue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub label: String,
+    /// The translation's language code. `None` for the original.
+    pub code: Option<String>,
     /// Sorted by start, with nothing to show left out.
     pub cues: Vec<SubCue>,
 }
@@ -83,7 +85,11 @@ impl Track {
     fn new(label: String, mut cues: Vec<SubCue>) -> Track {
         cues.retain(|c| !c.text.is_empty() && c.end > c.start);
         cues.sort_by(|a, b| a.start.total_cmp(&b.start));
-        Track { label, cues }
+        Track {
+            label,
+            code: None,
+            cues,
+        }
     }
 
     /// The cue on screen at `time`.
@@ -213,7 +219,10 @@ fn translation_track(lang: &str, file: &TranslationFile) -> Track {
         .iter()
         .map(|c| SubCue::new(c.id, c.start, c.end, &c.text))
         .collect();
-    Track::new(label, cues)
+    Track {
+        code: Some(lang.to_string()),
+        ..Track::new(label, cues)
+    }
 }
 
 /// The language codes of the translation files among `names`, sorted. The stem may hold dots; a

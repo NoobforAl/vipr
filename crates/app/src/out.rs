@@ -35,6 +35,8 @@ pub enum Out {
     Notice(String),
     /// Like `Notice`, for something the user must not miss: it stays until dismissed.
     Alert(String),
+    /// Ask where to save a job's video with subtitles drawn on: the translation `lang`, or the original for `None`.
+    ExportVideo { job: u64, lang: Option<String> },
 }
 
 /// Background work on a finished job's results.

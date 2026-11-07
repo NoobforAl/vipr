@@ -73,6 +73,10 @@ impl ProjectPaths {
     pub fn checkpoint(&self, lang: &str) -> PathBuf {
         self.file(&format!("{lang}.ckpt.jsonl"))
     }
+    /// `<stem>.cuts.json`: `cuts::CutsFile`.
+    pub fn cuts(&self) -> PathBuf {
+        self.file("cuts.json")
+    }
     /// `<stem>.chapters.json`: [`ChaptersFile`].
     pub fn chapters(&self) -> PathBuf {
         self.file("chapters.json")
