@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use crate::export::{ExportOptions, Kind, SubtitleFormat, SubtitleMode};
 use engine::chapters::transcript_lines;
 use engine::compare::{MAX_REASON_CHARS, check_merged, needs_llm};
 use engine::cuts::CutsFile;
@@ -282,7 +283,7 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let mut notice = format!("Saved the video with subtitles: {name}");
+            let mut notice = format!("Saved {name}");
             if cuts > 0 {
                 notice.push_str(&format!(
                     ". {cuts} cut {} left out, {} shorter.",
@@ -429,7 +430,7 @@ fn execute(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, String
         JobKind::Translate { target, source, .. } => translate(run, target, source, emit),
         JobKind::Compare { a, b, slug, .. } => compare(run, a, b, slug, emit),
         JobKind::Chapters { .. } => chapters(run, emit),
-        JobKind::Export { lang, out, .. } => export(run, lang.as_deref(), out, emit),
+        JobKind::Export { options, out, .. } => export(run, options, out, emit),
     }
 }
 
@@ -538,56 +539,79 @@ fn import_file(paths: &ProjectPaths, slug: &str) -> Result<ImportFile, String> {
 
 fn export(
     run: &Run,
-    lang: Option<&str>,
+    options: &ExportOptions,
     out: &Path,
     emit: &mut dyn FnMut(RunEvent),
 ) -> Result<Finished, String> {
-    let ffmpeg = engine::audio::find_ffmpeg()
-        .ok_or("putting subtitles on a video needs ffmpeg. Get it in Settings first.")?;
-    if !run.job.media.is_file() {
-        return Err("the video is not where it was. Open the player once to find it again.".into());
-    }
     let paths = &run.job.paths;
     let t = Transcript::load(&paths.transcript()).map_err(|e| load_error("the transcript", e))?;
-    let srt = match lang {
-        None => pipeline::transcript_srt(&t),
+    let translation: Option<TranslationFile> = match &options.lang {
+        None => None,
         Some(code) => {
             check_name(code)?;
-            let file: TranslationFile = fsio::load_json(&paths.translation(code))
-                .map_err(|e| load_error("the translation", e))?;
-            pipeline::translation_srt(&file)
+            Some(
+                fsio::load_json(&paths.translation(code))
+                    .map_err(|e| load_error("the translation", e))?,
+            )
         }
     };
+    let (cues, lang) = pipeline::export_cues(&t, translation.as_ref());
     // a damaged cuts file would cut the wrong parts, so it stops the export instead of being ignored
     let cuts_path = paths.cuts();
-    let cuts = if cuts_path.is_file() {
+    let cuts = if options.apply_cuts && cuts_path.is_file() {
         let file: CutsFile = fsio::load_json(&cuts_path).map_err(|e| load_error("the cuts", e))?;
         engine::cuts::normalize(&file.cuts, t.audio_seconds)
     } else {
         Vec::new()
     };
-    emit(RunEvent::Detail(if cuts.is_empty() {
-        "Putting the subtitles on the video".into()
-    } else {
-        format!(
-            "Putting the subtitles on the video and leaving out {} cut parts",
-            cuts.len()
-        )
+    let finished = Finished::Exported {
+        path: out.to_path_buf(),
+        cuts: cuts.len(),
+        cut_seconds: engine::cuts::removed(&cuts).round() as u64,
+    };
+    if options.kind == Kind::Subtitles {
+        let text = pipeline::subtitle_text(
+            &pipeline::retime_cues(&cues, &cuts),
+            &lang,
+            options.subtitle_format,
+        );
+        fsio::write_atomic(out, text.as_bytes())
+            .map_err(|e| format!("cannot write {} ({e})", out.display()))?;
+        return Ok(finished);
+    }
+
+    let ffmpeg = engine::audio::find_ffmpeg()
+        .ok_or("exporting video or sound needs ffmpeg. Get it in Settings first.")?;
+    if !run.job.media.is_file() {
+        return Err(
+            "the recording is not where it was. Open the player once to find it again.".into(),
+        );
+    }
+    // drawn subtitles go on before the cuts, a track is a separate file and moves with them
+    let srt = match (options.kind, options.subtitles) {
+        (Kind::Video, SubtitleMode::Burn) => {
+            Some(pipeline::subtitle_text(&cues, &lang, SubtitleFormat::Srt))
+        }
+        (Kind::Video, SubtitleMode::Track) => Some(pipeline::subtitle_text(
+            &pipeline::retime_cues(&cues, &cuts),
+            &lang,
+            SubtitleFormat::Srt,
+        )),
+        _ => None,
+    };
+    emit(RunEvent::Detail(match options.kind {
+        Kind::Audio => "Saving the sound".to_string(),
+        _ => format!("Making the {} video", options.container.label()),
     }));
-    pipeline::burn_subtitles(
+    pipeline::run_export(
         &ffmpeg,
-        &run.job.media,
-        &srt,
+        (options, &run.job.media, srt.as_deref()),
         (&paths.dir, out),
         (t.audio_seconds, &cuts),
         &paths.dir.join("export.log"),
         &mut |done| emit(RunEvent::Progress(done)),
     )?;
-    Ok(Finished::Exported {
-        path: out.to_path_buf(),
-        cuts: cuts.len(),
-        cut_seconds: engine::cuts::removed(&cuts).round() as u64,
-    })
+    Ok(finished)
 }
 
 // ------------------------------------------------------------------------- chapters

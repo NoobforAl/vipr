@@ -162,6 +162,23 @@ pub struct TranslatedLines {
     pub texts: Vec<String>,
 }
 
+/// The languages a result has translations in, as `(code, name)`. Reads the folder only, so it is quick.
+pub fn translation_languages(paths: &ProjectPaths) -> Vec<(String, String)> {
+    let names = std::fs::read_dir(&paths.dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok());
+    translation_langs(names, &paths.stem)
+        .into_iter()
+        .map(|code| {
+            let name =
+                language(&code).map_or_else(|| clean_separators(&code), |l| l.name.to_string());
+            (code, name)
+        })
+        .collect()
+}
+
 /// All saved translations of a result, for a transcript whose utterances start at `starts`. Touches the disk, so call it
 /// off the UI thread.
 pub fn translated_lines(paths: &ProjectPaths, starts: &[f64]) -> Vec<TranslatedLines> {

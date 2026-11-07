@@ -87,12 +87,26 @@ pub fn cut_at(cuts: &[Cut], time: f64) -> Option<&Cut> {
     cuts.iter().find(|c| c.start <= time && time < c.end)
 }
 
-/// An ffmpeg `filter_complex` that draws subtitles with `video_filter` on the whole picture first, so they keep their
-/// own times, then keeps only `parts` of the picture and of the first sound track and joins them. Trim and concat in
-/// one graph keep the sound with the picture, which `select` does not over many cuts. Gives `[v]`, and `[a]` when
-/// `with_audio`.
+/// Where `time` of the original lands once the cuts are left out. A moment inside a cut lands where that cut was.
+/// Expects [`normalize`]d cuts.
+pub fn shift(cuts: &[Cut], time: f64) -> f64 {
+    let mut out = time;
+    for c in cuts {
+        if time >= c.end {
+            out -= c.end - c.start;
+        } else if time > c.start {
+            out -= time - c.start;
+        }
+    }
+    out.max(0.0)
+}
+
+/// An ffmpeg `filter_complex` that keeps only `parts` and joins them. `video` runs on the whole picture first, so
+/// subtitles drawn there keep their own times; `None` leaves the picture out. Trim and concat in one graph keep the
+/// sound with the picture, which `select` does not over many cuts. Gives `[v]` and/or `[a]`; the sound is the first
+/// sound track.
 pub fn filter_complex(
-    video_filter: &str,
+    video: Option<&str>,
     parts: &[(f64, Option<f64>)],
     with_audio: bool,
 ) -> String {
@@ -101,11 +115,14 @@ pub fn filter_complex(
         Some(end) => format!("start={start:.3}:end={end:.3}"),
         None => format!("start={start:.3}"),
     };
-    let mut graph = format!("[0:v:0]{video_filter},split={n}");
-    for i in 0..n {
-        graph.push_str(&format!("[vs{i}]"));
+    let mut graph = String::new();
+    if let Some(filter) = video {
+        graph.push_str(&format!("[0:v:0]{filter},split={n}"));
+        for i in 0..n {
+            graph.push_str(&format!("[vs{i}]"));
+        }
+        graph.push(';');
     }
-    graph.push(';');
     if with_audio {
         graph.push_str(&format!("[0:a:0]asplit={n}"));
         for i in 0..n {
@@ -114,10 +131,12 @@ pub fn filter_complex(
         graph.push(';');
     }
     for (i, (start, end)) in parts.iter().enumerate() {
-        graph.push_str(&format!(
-            "[vs{i}]trim={},setpts=PTS-STARTPTS[v{i}];",
-            range(*start, *end)
-        ));
+        if video.is_some() {
+            graph.push_str(&format!(
+                "[vs{i}]trim={},setpts=PTS-STARTPTS[v{i}];",
+                range(*start, *end)
+            ));
+        }
         if with_audio {
             graph.push_str(&format!(
                 "[as{i}]atrim={},asetpts=PTS-STARTPTS[a{i}];",
@@ -126,13 +145,21 @@ pub fn filter_complex(
         }
     }
     for i in 0..n {
-        graph.push_str(&format!("[v{i}]"));
+        if video.is_some() {
+            graph.push_str(&format!("[v{i}]"));
+        }
         if with_audio {
             graph.push_str(&format!("[a{i}]"));
         }
     }
-    let audio = usize::from(with_audio);
-    graph.push_str(&format!("concat=n={n}:v=1:a={audio}[v]"));
+    graph.push_str(&format!(
+        "concat=n={n}:v={}:a={}",
+        usize::from(video.is_some()),
+        usize::from(with_audio)
+    ));
+    if video.is_some() {
+        graph.push_str("[v]");
+    }
     if with_audio {
         graph.push_str("[a]");
     }
@@ -199,14 +226,35 @@ mod tests {
 
     #[test]
     fn the_filter_draws_subtitles_first_then_joins_the_parts() {
-        let graph = filter_complex("subtitles=s.srt", &[(0.0, Some(10.0)), (20.0, None)], true);
+        let graph = filter_complex(
+            Some("subtitles=s.srt"),
+            &[(0.0, Some(10.0)), (20.0, None)],
+            true,
+        );
         assert!(graph.starts_with("[0:v:0]subtitles=s.srt,split=2[vs0][vs1];"));
         assert!(graph.contains("[vs0]trim=start=0.000:end=10.000,setpts=PTS-STARTPTS[v0];"));
         assert!(graph.contains("[as1]atrim=start=20.000,asetpts=PTS-STARTPTS[a1];"));
         assert!(graph.ends_with("[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"));
-        let silent = filter_complex("subtitles=s.srt", &[(5.0, None)], false);
+        let silent = filter_complex(Some("subtitles=s.srt"), &[(5.0, None)], false);
         assert!(!silent.contains("[0:a:0]"));
         assert!(silent.ends_with("[v0]concat=n=1:v=1:a=0[v]"));
+    }
+
+    #[test]
+    fn sound_alone_is_trimmed_and_joined_without_a_picture() {
+        let graph = filter_complex(None, &[(0.0, Some(10.0)), (20.0, None)], true);
+        assert!(!graph.contains("[0:v:0]"));
+        assert!(graph.ends_with("[a0][a1]concat=n=2:v=0:a=1[a]"));
+    }
+
+    #[test]
+    fn times_after_a_cut_move_back_by_its_length_and_inside_one_land_on_its_place() {
+        let cuts = normalize(&[cut(10.0, 20.0), cut(40.0, 50.0)], 100.0);
+        assert_eq!(shift(&cuts, 5.0), 5.0);
+        assert_eq!(shift(&cuts, 15.0), 10.0, "inside the first cut");
+        assert_eq!(shift(&cuts, 25.0), 15.0);
+        assert_eq!(shift(&cuts, 60.0), 40.0);
+        assert_eq!(shift(&[], 60.0), 60.0);
     }
 
     #[test]

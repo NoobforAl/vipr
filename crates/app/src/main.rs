@@ -4,6 +4,8 @@
 //! a transcript viewer, and a Settings popup. Work is done by separate worker processes
 //! (see `pipeline.rs`); this file only draws and routes messages.
 
+mod export;
+mod export_ui;
 mod fade;
 mod icons;
 mod import_ui;
@@ -420,12 +422,6 @@ enum Message {
     ViewLanguage(Option<usize>),
     /// Ask where to save this job's video with the subtitles on show drawn on.
     ExportVideo(u64),
-    /// The answer: `None` when the dialog was closed.
-    ExportTo {
-        job: u64,
-        lang: Option<String>,
-        path: Option<PathBuf>,
-    },
     Translate(u64),
     // saved results
     OpenResult {
@@ -469,6 +465,7 @@ enum Message {
     Frame(Instant),
     Profiles(profiles_ui::Msg),
     Import(import_ui::Msg),
+    Export(export_ui::Msg),
     Review(review_ui::Msg),
     Jobs(jobs::Msg),
 }
@@ -534,6 +531,7 @@ struct App {
     page_fade: Option<(Instant, iced::Color)>,
     profiles: profiles_ui::State,
     import: import_ui::State,
+    export: export_ui::State,
     review: review_ui::State,
     queue: jobs::State,
 }
@@ -606,6 +604,7 @@ impl App {
             page_fade: None,
             profiles: profiles_ui::State::default(),
             import: import_ui::State::default(),
+            export: export_ui::State::default(),
             review: review_ui::State::default(),
             queue: jobs::State::default(),
         };
@@ -821,6 +820,7 @@ impl App {
     fn can_take_over(&self, job: u64) -> bool {
         !self.settings_open
             && !import_ui::is_open(&self.import)
+            && !export_ui::is_open(&self.export)
             && (self.page == Page::Home || self.page == Page::Transcript(job))
     }
 
@@ -886,7 +886,10 @@ impl App {
         key: iced::keyboard::Key,
         mods: iced::keyboard::Modifiers,
     ) -> Task<Message> {
-        if self.settings_open || import_ui::is_open(&self.import) {
+        if self.settings_open
+            || import_ui::is_open(&self.import)
+            || export_ui::is_open(&self.export)
+        {
             return Task::none();
         }
         let message = match self.page {
@@ -1207,7 +1210,9 @@ impl App {
                 Task::none()
             }
             Message::Escape => {
-                if import_ui::is_open(&self.import) {
+                if export_ui::is_open(&self.export) {
+                    self.update(Message::Export(export_ui::Msg::Close))
+                } else if import_ui::is_open(&self.import) {
                     self.update(Message::Import(import_ui::Msg::Close))
                 } else if self.settings_open {
                     self.update(Message::CloseSettings)
@@ -1506,23 +1511,6 @@ impl App {
                     .map(|l| l.code.clone());
                 self.ask_export(id, lang)
             }
-            Message::ExportTo {
-                job,
-                lang,
-                path: Some(path),
-            } => {
-                let path = path.with_extension("mp4");
-                if self.job_ref(job).is_some_and(|j| j.media == path) {
-                    self.alert("The export can't replace the original video. Choose another name.");
-                    return Task::none();
-                }
-                self.handle_out(Out::Enqueue(out::JobKind::Export {
-                    job,
-                    lang,
-                    out: path,
-                }))
-            }
-            Message::ExportTo { path: None, .. } => Task::none(),
             Message::ViewLanguage(index) => {
                 self.viewing = index.filter(|i| *i < self.translations.len());
                 if let Page::Transcript(id) = self.page {
@@ -1822,6 +1810,10 @@ impl App {
                 let (task, out) = import_ui::update(&mut self.import, msg);
                 Task::batch([task.map(Message::Import), self.handle_out(out)])
             }
+            Message::Export(msg) => {
+                let (task, out) = export_ui::update(&mut self.export, msg);
+                Task::batch([task.map(Message::Export), self.handle_out(out)])
+            }
             Message::Review(msg) => {
                 let (task, out) = review_ui::update(&mut self.review, msg);
                 Task::batch([task.map(Message::Review), self.handle_out(out)])
@@ -1871,19 +1863,20 @@ impl App {
             return Task::none();
         };
         if !job.media.is_file() {
-            self.alert("The video for this result is not where it was. Open the player once to find it again.");
+            self.alert("The recording for this result is not where it was. Open the player once to find it again.");
             return Task::none();
         }
-        let label = lang
-            .as_deref()
-            .map_or_else(|| "original".to_string(), jobs::language_name);
-        let name = format!("{} - {label} subtitles.mp4", job.paths.stem);
-        let dir = job.media.parent().map(std::path::Path::to_path_buf);
-        Task::perform(pick_export(dir, name), move |path| Message::ExportTo {
-            job: id,
-            lang: lang.clone(),
-            path,
-        })
+        let duration = self
+            .job(id)
+            .and_then(|j| j.transcript.as_ref())
+            .map_or(0.0, |t| t.audio_seconds);
+        // not known yet: let the dialog offer it, an export that can't use it says so
+        let gpu = self
+            .detection
+            .as_ref()
+            .is_none_or(|d| d.recommended == gpu_detect::Backend::Cuda);
+        export_ui::open(&mut self.export, job, lang, duration, gpu);
+        Task::none()
     }
 
     /// The translation on show, one text per utterance. `None` when the page shows the original.
@@ -2101,6 +2094,20 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(theme::scrim()),
+            ));
+        }
+        if export_ui::is_open(&self.export) {
+            layers.push(opaque(
+                mouse_area(
+                    container(center(opaque(
+                        export_ui::view(&self.export, t).map(Message::Export),
+                    )))
+                    .padding(24)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(theme::scrim()),
+                )
+                .on_press(Message::Export(export_ui::Msg::Close)),
             ));
         }
         // invisible handles on the window edges so the borderless window can still be resized
@@ -4242,18 +4249,6 @@ async fn pick_ffmpeg() -> Option<PathBuf> {
         dialog = dialog.add_filter("ffmpeg", &["exe"]);
     }
     dialog.pick_file().await.map(|f| f.path().to_path_buf())
-}
-
-/// Where to save an exported video.
-async fn pick_export(dir: Option<PathBuf>, name: String) -> Option<PathBuf> {
-    let mut dialog = rfd::AsyncFileDialog::new()
-        .set_title("Export the video with subtitles")
-        .set_file_name(name)
-        .add_filter("MP4 video", &["mp4"]);
-    if let Some(dir) = dir {
-        dialog = dialog.set_directory(dir);
-    }
-    dialog.save_file().await.map(|f| f.path().to_path_buf())
 }
 
 /// A result folder, or the `<stem>.json` inside one.

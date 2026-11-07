@@ -1,6 +1,6 @@
-//! The bar shown while work runs. The filled part is the real progress, eased so it glides instead of jumping. A soft
-//! pulse moves through the rest, so a long step with nothing to report (loading a model) doesn't look frozen. The pulse
-//! says nothing about how far along the work is, so it never adds to the filled part.
+//! The bar shown while work runs. The filled part is the real progress, eased so it glides instead of jumping. Until
+//! there is a first figure (a model loading, say), a soft pulse moves through the bar so it doesn't look frozen. Once
+//! there is one, the pulse goes: next to a real figure it read as a second, wrong one.
 
 use iced::widget::{container, row, space};
 use iced::{Element, Length};
@@ -64,7 +64,10 @@ pub fn bar<'a, M: 'a>(fraction: f32, clock: f32, height: f32, t: Tokens) -> Elem
                 .style(theme::rounded_fill(t.accent_fill, radius)),
         );
     }
-    if open > 0 {
+    if open > 0 && filled > 0 {
+        // with a number to show, a moving block next to it would read as a second bar
+        line = line.push(space().width(Length::FillPortion(open)));
+    } else if open > 0 {
         let (before, size, after) = pulse(clock);
         let mut travel = row![].height(height).width(Length::Fill).push(gap(before));
         if size > 0 {

@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::export::{Encoder, ExportOptions, SubtitleFormat};
 use engine::cuts::Cut;
 use engine::fsio;
 use engine::profiles::{GlossaryTerm, Profile};
@@ -664,69 +665,75 @@ pub fn write_outputs(t: &Transcript, dir: &Path, stem: &str) -> Result<Vec<PathB
     Ok(out)
 }
 
-/// ViPr's own subtitles as an `.srt` file holds them, with the marks a right-to-left language needs.
-pub fn transcript_srt(t: &Transcript) -> String {
-    let cues = build_cues(t, &SubtitleOptions::default());
-    to_srt(&mark_rtl(&cues, &t.language))
+/// The subtitles an export uses, on the original timeline: ViPr's own, or a translation's. With the language they are
+/// in, for the marks a right-to-left language needs.
+pub fn export_cues(t: &Transcript, translation: Option<&TranslationFile>) -> (Vec<Cue>, String) {
+    match translation {
+        Some(file) => (translated_cues(file), file.target.clone()),
+        None => (
+            build_cues(t, &SubtitleOptions::default()),
+            t.language.clone(),
+        ),
+    }
 }
 
-/// A translation as an `.srt` file holds it.
-pub fn translation_srt(file: &TranslationFile) -> String {
-    to_srt(&mark_rtl(&translated_cues(file), &file.target))
+/// The cues as they fall once `cuts` are left out. A cue inside a cut, or left too short by one, goes.
+pub fn retime_cues(cues: &[Cue], cuts: &[Cut]) -> Vec<Cue> {
+    cues.iter()
+        .map(|c| Cue {
+            start: engine::cuts::shift(cuts, c.start),
+            end: engine::cuts::shift(cuts, c.end),
+            ..c.clone()
+        })
+        .filter(|c| c.end - c.start >= 0.2)
+        .collect()
+}
+
+/// A subtitle file's text: `srt`, `vtt` or `txt`.
+pub fn subtitle_text(cues: &[Cue], lang: &str, format: SubtitleFormat) -> String {
+    match format {
+        SubtitleFormat::Srt => to_srt(&mark_rtl(cues, lang)),
+        SubtitleFormat::Vtt => to_vtt(&mark_rtl(cues, lang)),
+        SubtitleFormat::Txt => {
+            let txt: String = cues.iter().map(|c| txt_line(c.start, &c.text)).collect();
+            mark_rtl_text(&txt, lang)
+        }
+    }
 }
 
 /// The subtitle file ffmpeg reads while exporting. A fixed plain name in the folder ffmpeg runs in: a full Windows path
 /// would need escaping in a filter, and a wrong escape is a broken export.
-const BURN_SUBTITLES: &str = "vipr-export.srt";
-/// How the drawn subtitles look: white with a dark outline reads on any picture.
-const BURN_STYLE: &str = "FontName=Arial,FontSize=16,Outline=2,Shadow=1,MarginV=20";
+const EXPORT_SUBTITLES: &str = "vipr-export.srt";
 
-/// Writes `media` again as an MP4 at `out` with `srt` drawn onto the picture. `dirs` is the folder to work in and the
-/// file to write. The NVIDIA encoder goes first, and the processor takes over when it can't run. Writes to a `.part`
-/// file and renames it at the end, so a failed or cancelled export never leaves a broken video behind. `on_progress`
-/// receives 0..1.
-pub fn burn_subtitles(
+/// Runs an export with ffmpeg: `srt` is the subtitle file it reads, if any. `dirs` is the folder to work in and the
+/// file to write. Each of `options`' encoder attempts is tried in turn until one runs. Writes to a `.part` file and
+/// renames it at the end, so a failed or cancelled export never leaves a broken file behind. `on_progress` gets 0..1.
+pub fn run_export(
     ffmpeg: &Path,
-    media: &Path,
-    srt: &str,
+    (options, media, srt): (&ExportOptions, &Path, Option<&str>),
     dirs: (&Path, &Path),
     (duration, cuts): (f64, &[Cut]),
     log: &Path,
     on_progress: &mut dyn FnMut(f32),
 ) -> Result<(), String> {
     let (work_dir, out) = dirs;
-    let draw = format!("subtitles={BURN_SUBTITLES}:force_style='{BURN_STYLE}'");
-    // without cuts every sound track is kept; cutting joins the parts of the picture and the first sound track
-    let (filter, out_seconds): (Vec<String>, f64) = if cuts.is_empty() {
-        let args = ["-map", "0:v:0", "-map", "0:a?", "-vf", &draw];
-        (args.map(String::from).to_vec(), duration)
-    } else {
-        let graph = engine::cuts::filter_complex(&draw, &engine::cuts::kept(cuts, duration), true);
-        let args = ["-filter_complex", &graph, "-map", "[v]", "-map", "[a]"];
-        (
-            args.map(String::from).to_vec(),
-            duration - engine::cuts::removed(cuts),
-        )
-    };
-    let subs = work_dir.join(BURN_SUBTITLES);
-    fsio::write_atomic(&subs, srt.as_bytes())
-        .map_err(|e| format!("cannot write the subtitles: {e}"))?;
-    let part = out.with_extension("mp4.part");
-    let encoders: [&[&str]; 2] = [
-        &["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "21"],
-        &["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"],
-    ];
+    let subs = work_dir.join(EXPORT_SUBTITLES);
+    if let Some(text) = srt {
+        fsio::write_atomic(&subs, text.as_bytes())
+            .map_err(|e| format!("cannot write the subtitles: {e}"))?;
+    }
+    let part = out.with_extension(format!("{}.part", options.extension()));
+    let out_seconds = duration - engine::cuts::removed(cuts);
     let mut result = Err("no encoder could run".to_string());
-    for encoder in encoders {
-        result = run_ffmpeg(
-            ffmpeg,
-            (media, &filter),
-            encoder,
-            (work_dir, &part),
-            out_seconds,
-            log,
-            on_progress,
+    for video in options.video_attempts() {
+        let args = options.ffmpeg_args(
+            media,
+            srt.map(|_| EXPORT_SUBTITLES),
+            (duration, cuts),
+            &video,
+            &part,
         );
+        result = run_ffmpeg(ffmpeg, work_dir, &args, out_seconds, log, on_progress);
         if result.is_ok() || CANCELLED.load(Ordering::SeqCst) {
             break;
         }
@@ -735,6 +742,13 @@ pub fn burn_subtitles(
     match result {
         Ok(()) => std::fs::rename(&part, out)
             .map_err(|e| format!("could not save {} ({e})", out.display())),
+        Err(e) if options.encoder == Encoder::Gpu && e != "Cancelled" => {
+            let _ = std::fs::remove_file(&part);
+            Err(format!(
+                "the graphics card could not make {} video here. Choose Auto or Processor. ({e})",
+                options.codec.label()
+            ))
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&part);
             Err(e)
@@ -744,32 +758,14 @@ pub fn burn_subtitles(
 
 fn run_ffmpeg(
     ffmpeg: &Path,
-    (media, filter): (&Path, &[String]),
-    encoder: &[&str],
-    dirs: (&Path, &Path),
+    work_dir: &Path,
+    args: &[String],
     duration: f64,
     log: &Path,
     on_progress: &mut dyn FnMut(f32),
 ) -> Result<(), String> {
-    let (work_dir, part) = dirs;
     let mut cmd = Command::new(ffmpeg);
-    cmd.current_dir(work_dir)
-        .args(["-hide_banner", "-nostdin", "-y", "-i"])
-        .arg(media)
-        .args(filter)
-        .args(encoder)
-        .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"])
-        .args([
-            "-movflags",
-            "+faststart",
-            "-progress",
-            "pipe:1",
-            "-nostats",
-            "-f",
-            "mp4",
-        ])
-        .arg(part)
-        .stdout(Stdio::piped());
+    cmd.current_dir(work_dir).args(args).stdout(Stdio::piped());
     match File::create(log) {
         Ok(f) => cmd.stderr(Stdio::from(f)),
         Err(_) => cmd.stderr(Stdio::null()),
@@ -810,13 +806,11 @@ fn run_ffmpeg(
         return Ok(());
     }
     let details = std::fs::read_to_string(log).unwrap_or_default();
-    if details.contains("matches no streams") {
-        return Err(
-            "this recording has no picture, so there is nothing to put the subtitles on.".into(),
-        );
+    if details.contains("matches no streams") || details.contains("does not contain any stream") {
+        return Err("this recording has no picture or no sound for this kind of export.".into());
     }
     Err(format!(
-        "ffmpeg could not make the video (exit code {:?}); details: {}",
+        "ffmpeg could not make the file (exit code {:?}); details: {}",
         status.code(),
         log.display()
     ))

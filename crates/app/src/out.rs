@@ -35,7 +35,7 @@ pub enum Out {
     Notice(String),
     /// Like `Notice`, for something the user must not miss: it stays until dismissed.
     Alert(String),
-    /// Ask where to save a job's video with subtitles drawn on: the translation `lang`, or the original for `None`.
+    /// Open the export dialog for a job, with the translation `lang` chosen (`None`: the original).
     ExportVideo { job: u64, lang: Option<String> },
 }
 
@@ -57,10 +57,10 @@ pub enum JobKind {
     },
     /// Writes `<stem>.chapters.json`.
     Chapters { job: u64 },
-    /// Writes the video again with subtitles drawn on, to `out`. `lang` is a translation's code, `None` the original.
+    /// Writes a video, a subtitle file or the sound to `out`, as `options` say.
     Export {
         job: u64,
-        lang: Option<String>,
+        options: crate::export::ExportOptions,
         out: PathBuf,
     },
 }
