@@ -55,6 +55,12 @@ pub enum JobKind {
     },
     /// Writes `<stem>.chapters.json`.
     Chapters { job: u64 },
+    /// Writes the video again with subtitles drawn on, to `out`. `lang` is a translation's code, `None` the original.
+    Export {
+        job: u64,
+        lang: Option<String>,
+        out: PathBuf,
+    },
 }
 
 impl JobKind {
@@ -62,7 +68,8 @@ impl JobKind {
         match self {
             JobKind::Translate { job, .. }
             | JobKind::Compare { job, .. }
-            | JobKind::Chapters { job } => *job,
+            | JobKind::Chapters { job }
+            | JobKind::Export { job, .. } => *job,
         }
     }
 }

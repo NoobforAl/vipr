@@ -35,6 +35,7 @@ use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{
     button, center, column, combo_box, container, mouse_area, opaque, pick_list, progress_bar,
     responsive, row, scrollable, space, stack, svg, text, text_editor, text_input, toggler,
+    tooltip,
 };
 use iced::{
     Alignment, Color, Element, Font, Length, Size, Subscription, Task, event, font, keyboard,
@@ -306,7 +307,8 @@ fn file_name(path: &std::path::Path) -> String {
 #[derive(Debug, Clone)]
 struct Notice {
     text: String,
-    expires: Instant,
+    /// `None` for a problem: it stays until it is closed, so it can't be missed.
+    expires: Option<Instant>,
 }
 
 /// How long an `Out::Notice` stays up.
@@ -416,6 +418,14 @@ enum Message {
     },
     /// Show this translation on the transcript page. `None` is the original text.
     ViewLanguage(Option<usize>),
+    /// Ask where to save this job's video with the subtitles on show drawn on.
+    ExportVideo(u64),
+    /// The answer: `None` when the dialog was closed.
+    ExportTo {
+        job: u64,
+        lang: Option<String>,
+        path: Option<PathBuf>,
+    },
     Translate(u64),
     // saved results
     OpenResult {
@@ -699,7 +709,7 @@ impl App {
             || self.running.is_some()
             || self.copied.is_some()
             || self.notice.is_some()
-            || !self.notices.is_empty()
+            || self.notices.iter().any(|n| n.expires.is_some())
             || self.ffmpeg_dl.is_some()
             || jobs::busy(&self.queue)
     }
@@ -779,7 +789,7 @@ impl App {
                 Task::none()
             }
             Out::Alert(line) => {
-                self.tell(&line);
+                self.alert(&line);
                 Task::none()
             }
         }
@@ -787,12 +797,21 @@ impl App {
 
     /// All notice text passes here: errors can quote paths and file content.
     fn tell(&mut self, line: &str) {
+        self.push_notice(line, Some(Instant::now() + NOTICE_TIME));
+    }
+
+    /// A problem: it stays until it is closed.
+    fn alert(&mut self, line: &str) {
+        self.push_notice(line, None);
+    }
+
+    fn push_notice(&mut self, line: &str, expires: Option<Instant>) {
         if self.notices.len() == MAX_NOTICES {
             self.notices.remove(0);
         }
         self.notices.push(Notice {
             text: clean_separators(line),
-            expires: Instant::now() + NOTICE_TIME,
+            expires,
         });
     }
 
@@ -944,6 +963,7 @@ impl App {
             out::JobKind::Compare { .. } | out::JobKind::Chapters { .. } => {
                 self.model_path(Role::Llm)
             }
+            out::JobKind::Export { .. } => None,
         };
         let context = jobs::JobContext {
             job: self.job_ref(kind.job()),
@@ -1013,7 +1033,7 @@ impl App {
         if let Some(profile) = profiles_ui::active(&self.profiles, &self.settings)
             && let Err(e) = pipeline::apply_profile(&mut input, &profile)
         {
-            self.tell(&format!(
+            self.alert(&format!(
                 "The active profile could not be used for this run: {e}"
             ));
         }
@@ -1097,7 +1117,7 @@ impl App {
                     self.notice = None;
                 }
                 let now = Instant::now();
-                self.notices.retain(|n| n.expires > now);
+                self.notices.retain(|n| n.expires.is_none_or(|at| at > now));
                 Task::none()
             }
             Message::WinId(id) => {
@@ -1472,6 +1492,47 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ExportVideo(id) => {
+                let Some(job) = self.job_ref(id) else {
+                    return Task::none();
+                };
+                if !job.media.is_file() {
+                    self.alert("The video for this result is not where it was. Open the player once to find it again.");
+                    return Task::none();
+                }
+                let lang = self
+                    .viewing
+                    .and_then(|i| self.translations.get(i))
+                    .map(|l| l.code.clone());
+                let name = format!(
+                    "{} - {} subtitles.mp4",
+                    job.paths.stem,
+                    self.viewing_label().unwrap_or("original")
+                );
+                let dir = job.media.parent().map(std::path::Path::to_path_buf);
+                Task::perform(pick_export(dir, name), move |path| Message::ExportTo {
+                    job: id,
+                    lang: lang.clone(),
+                    path,
+                })
+            }
+            Message::ExportTo {
+                job,
+                lang,
+                path: Some(path),
+            } => {
+                let path = path.with_extension("mp4");
+                if self.job_ref(job).is_some_and(|j| j.media == path) {
+                    self.alert("The export can't replace the original video. Choose another name.");
+                    return Task::none();
+                }
+                self.handle_out(Out::Enqueue(out::JobKind::Export {
+                    job,
+                    lang,
+                    out: path,
+                }))
+            }
+            Message::ExportTo { path: None, .. } => Task::none(),
             Message::ViewLanguage(index) => {
                 self.viewing = index.filter(|i| *i < self.translations.len());
                 if let Page::Transcript(id) = self.page {
@@ -1531,7 +1592,7 @@ impl App {
                 Message::ResultLoaded,
             ),
             Message::ResultLoaded(Err(e)) => {
-                self.tell(&format!("That result could not be opened: {e}"));
+                self.alert(&format!("That result could not be opened: {e}"));
                 Task::none()
             }
             Message::ResultLoaded(Ok(loaded)) => {
@@ -1550,7 +1611,7 @@ impl App {
                     return Task::none();
                 };
                 if let Err(e) = jobs::locate_media(&paths, &path) {
-                    self.tell(&format!(
+                    self.alert(&format!(
                         "The new place of the media could not be saved: {e}"
                     ));
                 }
@@ -2258,7 +2319,7 @@ impl App {
         .spacing(10);
 
         let title = column![
-            text("Transcripts").size(26).font(semibold()).color(t.text),
+            text("Transcripts").size(22).font(semibold()).color(t.text),
             text("Turn recordings into clean, speaker-labelled text and subtitles. Everything runs on this computer.")
                 .size(13)
                 .color(t.muted),
@@ -2360,10 +2421,12 @@ impl App {
             );
         }
         if !self.notices.is_empty() {
-            list = list.push(heading(if self.notices.len() == 1 {
-                "Notice".to_string()
-            } else {
-                format!("{} notices", self.notices.len())
+            let problems = self.notices.iter().filter(|n| n.expires.is_none()).count();
+            list = list.push(heading(match (self.notices.len(), problems) {
+                (1, 1) => "Problem".to_string(),
+                (1, _) => "Notice".to_string(),
+                (n, 0) => format!("{n} notices"),
+                (n, p) => format!("{n} messages, {p} to look at"),
             }));
             for n in &self.notices {
                 list = list.push(text(n.text.clone()).size(12).color(t.muted));
@@ -2387,7 +2450,15 @@ impl App {
         Some(
             container(
                 row![
-                    icons::icon(icons::ALERT, 20.0, t.warn),
+                    icons::icon(
+                        icons::ALERT,
+                        20.0,
+                        if self.notices.iter().any(|n| n.expires.is_none()) {
+                            t.bad
+                        } else {
+                            t.warn
+                        }
+                    ),
                     list,
                     button(icons::icon(icons::X, 14.0, t.muted))
                         .padding(6)
@@ -2958,7 +3029,7 @@ impl App {
                 .style(theme::outline_btn(t))
                 .on_press(Message::Back),
             column![
-                text(name).size(20).font(semibold()).color(t.text),
+                text(name).size(17).font(semibold()).color(t.text),
                 text(format!(
                     "{}  -  {} turns  -  text {}",
                     clock(tr.audio_seconds),
@@ -3044,81 +3115,80 @@ impl App {
                 .padding([6, 10])
                 .style(theme::outline_btn(t))
                 .on_press(Message::SaveNames),
-            space::horizontal(),
-            text("Select text with the mouse, then Ctrl+C. Also saved as .txt  .srt  .vtt  .json")
-                .size(12)
-                .color(t.faint),
+            icons::info_tip(
+                "Select text with the mouse, then Ctrl+C. The results are also saved as .txt, .srt, .vtt and .json \
+                 files: Open folder shows them.",
+                t
+            ),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
 
-        let mut list = column![].spacing(14);
+        let mut list = column![];
         for (i, u) in tr.utterances.iter().enumerate().take(self.shown) {
             let c = t.speaker(u.speaker);
             let who = clean_separators(&tr.speaker_name(u.speaker));
-            let initial = who
-                .chars()
-                .next()
-                .map(|ch| ch.to_uppercase().to_string())
-                .unwrap_or_else(|| "?".into());
             let copied_here = matches!(self.copied, Some((CopyTarget::Row(r), _)) if r == i);
-            // the message text: selectable (mouse drag, double-click a word, Ctrl+C)
+            // the text: selectable (mouse drag, double-click a word, Ctrl+C)
             let body: Element<'_, Message> = match self.rows.get(i) {
                 Some(content) => text_editor(content)
                     .on_action(move |a| Message::RowAction(i, a))
-                    .size(15)
+                    .size(14)
                     .padding(0)
                     .style(theme::selectable(t))
                     .into(),
                 None => text(clean_separators(&u.text))
-                    .size(15)
+                    .size(14)
                     .color(t.text)
                     .into(),
             };
+            let copy = button(icons::icon(
+                if copied_here {
+                    icons::CHECK
+                } else {
+                    icons::COPY
+                },
+                13.0,
+                if copied_here { t.ok } else { t.faint },
+            ))
+            .padding([4, 6])
+            .style(theme::ghost(t))
+            .on_press(Message::CopyRow(i));
+            if i > 0 {
+                list = list.push(
+                    container(space())
+                        .width(Length::Fill)
+                        .height(1)
+                        .style(theme::rounded_fill(t.rule, 0.0)),
+                );
+            }
             list = list.push(
                 row![
-                    container(text(initial).size(14).font(semibold()).color(c))
-                        .center_x(Length::Fixed(34.0))
-                        .center_y(Length::Fixed(34.0))
-                        .style(theme::disc(theme::with_alpha(c, 0.16))),
                     column![
-                        row![
-                            text(who).size(13).font(semibold()).color(c),
-                            text(clock(u.start)).size(12).color(t.faint),
-                            space::horizontal(),
-                            button(
-                                row![
-                                    icons::icon(
-                                        if copied_here {
-                                            icons::CHECK
-                                        } else {
-                                            icons::COPY
-                                        },
-                                        13.0,
-                                        if copied_here { t.ok } else { t.muted }
-                                    ),
-                                    text(if copied_here { "Copied" } else { "Copy" })
-                                        .size(12)
-                                        .color(if copied_here { t.ok } else { t.muted }),
-                                ]
-                                .spacing(5)
-                                .align_y(Alignment::Center)
-                            )
-                            .padding([3, 8])
-                            .style(theme::ghost(t))
-                            .on_press(Message::CopyRow(i)),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                        container(body)
-                            .padding([10, 14])
-                            .width(Length::Fill)
-                            .style(theme::bubble(t)),
+                        text(who).size(12).font(semibold()).color(c),
+                        text(clock(u.start)).size(11).color(t.faint),
                     ]
-                    .spacing(4)
-                    .width(Length::Fill),
+                    .spacing(2)
+                    .width(Length::Fixed(120.0)),
+                    container(body).width(Length::Fill),
+                    tooltip(
+                        copy,
+                        container(
+                            text(if copied_here {
+                                "Copied"
+                            } else {
+                                "Copy this line"
+                            })
+                            .size(12)
+                            .color(t.text)
+                        )
+                        .padding([4, 8])
+                        .style(theme::toast(t)),
+                        tooltip::Position::Left,
+                    ),
                 ]
-                .spacing(12),
+                .spacing(14)
+                .padding([10, 0]),
             );
         }
         if tr.utterances.len() > self.shown {
@@ -3141,27 +3211,27 @@ impl App {
                 column![
                     header,
                     self.result_actions(id, tr),
-                    self.language_switch(),
                     legend,
                     jobs::view(&self.queue, t, self.epoch.elapsed().as_secs_f32())
                         .map(Message::Jobs)
                 ]
-                .spacing(14)
+                .spacing(10)
             )
-            .padding([18, 28])
+            .padding([12, 20])
             .width(Length::Fill)
             .style(theme::panel(t)),
-            scrollable(container(list).padding([20, 28]).max_width(920))
+            scrollable(container(list).padding([8, 20]).max_width(980))
                 .width(Length::Fill)
                 .height(Length::Fill),
         ]
         .into()
     }
 
-    /// Original and each saved translation, to choose what the page below shows. Nothing without a translation.
-    fn language_switch(&self) -> Element<'_, Message> {
+    /// Original and each saved translation, to choose what the page below shows, and what an export draws on the
+    /// video. Nothing without a translation.
+    fn language_switch(&self) -> Option<Element<'_, Message>> {
         if self.translations.is_empty() {
-            return space().into();
+            return None;
         }
         let t = self.tokens;
         let choice = |label: &str, index: Option<usize>| -> Element<'_, Message> {
@@ -3172,18 +3242,19 @@ impl App {
                 .into()
         };
         let mut items = vec![
+            container(space())
+                .width(1)
+                .height(22)
+                .style(theme::rounded_fill(t.rule, 0.0))
+                .into(),
             text("Showing").size(12).color(t.muted).into(),
             choice("Original", None),
         ];
         for (i, language) in self.translations.iter().enumerate() {
             items.push(choice(language.label.as_str(), Some(i)));
         }
-        row(items)
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .wrap()
-            .vertical_spacing(8)
-            .into()
+        // one piece, so a narrow window moves it to the next line whole instead of splitting it
+        Some(row(items).spacing(8).align_y(Alignment::Center).into())
     }
 
     /// What can be done with a finished result: translate it, import subtitles, review a comparison.
@@ -3223,6 +3294,10 @@ impl App {
                 .padding([7, 12])
                 .style(theme::outline_btn(t))
                 .on_press(Message::OpenImport(id)),
+            button(text("Export video").size(13))
+                .padding([7, 12])
+                .style(theme::outline_btn(t))
+                .on_press(Message::ExportVideo(id)),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -3241,7 +3316,10 @@ impl App {
                     .color(t.muted),
             );
         }
-        r.into()
+        if let Some(switch) = self.language_switch() {
+            r = r.push(switch);
+        }
+        r.wrap().vertical_spacing(10).into()
     }
 
     // -------------------------------------------------------------- views: settings popup
@@ -4153,6 +4231,18 @@ async fn pick_ffmpeg() -> Option<PathBuf> {
         dialog = dialog.add_filter("ffmpeg", &["exe"]);
     }
     dialog.pick_file().await.map(|f| f.path().to_path_buf())
+}
+
+/// Where to save an exported video.
+async fn pick_export(dir: Option<PathBuf>, name: String) -> Option<PathBuf> {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title("Export the video with subtitles")
+        .set_file_name(name)
+        .add_filter("MP4 video", &["mp4"]);
+    if let Some(dir) = dir {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file().await.map(|f| f.path().to_path_buf())
 }
 
 /// A result folder, or the `<stem>.json` inside one.

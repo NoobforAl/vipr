@@ -1,8 +1,10 @@
 //! Line icons (24x24, stroke only). Shapes follow the Lucide set (ISC licence). The SVG widget tints
 //! them with the colour we pass, so the stroke colour inside the file does not matter.
 
-use iced::widget::svg;
+use iced::widget::{container, svg, text, tooltip};
 use iced::{Color, Element, Length};
+
+use crate::theme::{self, Tokens};
 
 macro_rules! icon_src {
     ($body:expr) => {
@@ -46,6 +48,8 @@ pub const COPY: &str = icon_src!(
 pub const CPU: &str = icon_src!(
     r#"<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/>"#
 );
+pub const INFO: &str =
+    icon_src!(r#"<circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/>"#);
 pub const ALERT: &str =
     icon_src!(r#"<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>"#);
 
@@ -106,6 +110,20 @@ pub fn icon<'a, M: 'a>(src: &'static str, size: f32, color: Color) -> Element<'a
 /// How far a spinner has turned after `clock` seconds, in radians.
 pub fn spin_angle(clock: f32) -> f32 {
     (clock * 7.0) % std::f32::consts::TAU
+}
+
+/// An info mark that shows `tip` on hover: help that is there when wanted and out of the way otherwise.
+pub fn info_tip<'a, M: 'a>(tip: &'a str, t: Tokens) -> Element<'a, M> {
+    tooltip(
+        icon(INFO, 14.0, t.faint),
+        container(text(tip).size(12).color(t.text))
+            .padding([6, 10])
+            .max_width(320)
+            .style(theme::toast(t)),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
 }
 
 /// A spinner turned by `angle` radians (call again with a new angle to animate it).

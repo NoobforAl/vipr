@@ -148,6 +148,8 @@ fn texts_per_utterance(starts: &[f64], cues: &[SubCue]) -> Vec<String> {
 /// One saved translation, ready to show next to a transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranslatedLines {
+    /// The language's code, as in the translation's file name.
+    pub code: String,
     /// The language's name.
     pub label: String,
     /// Safe for a widget. One for each utterance of the transcript.
@@ -157,13 +159,21 @@ pub struct TranslatedLines {
 /// All saved translations of a result, for a transcript whose utterances start at `starts`. Touches the disk, so call it
 /// off the UI thread.
 pub fn translated_lines(paths: &ProjectPaths, starts: &[f64]) -> Vec<TranslatedLines> {
-    load_tracks(paths)
-        .tracks
+    let names = std::fs::read_dir(&paths.dir)
         .into_iter()
-        .filter(|track| track.label != ORIGINAL)
-        .map(|track| TranslatedLines {
-            texts: texts_per_utterance(starts, &track.cues),
-            label: track.label,
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok());
+    translation_langs(names, &paths.stem)
+        .into_iter()
+        .filter_map(|code| {
+            let file: TranslationFile = engine::fsio::load_json(&paths.translation(&code)).ok()?;
+            let track = translation_track(&code, &file);
+            Some(TranslatedLines {
+                texts: texts_per_utterance(starts, &track.cues),
+                label: track.label,
+                code,
+            })
         })
         .collect()
 }
@@ -463,6 +473,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].label, "Persian");
+        assert_eq!(lines[0].code, "fa");
         assert_eq!(lines[0].texts, ["سلام"]);
     }
 

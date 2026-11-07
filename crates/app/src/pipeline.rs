@@ -663,6 +663,154 @@ pub fn write_outputs(t: &Transcript, dir: &Path, stem: &str) -> Result<Vec<PathB
     Ok(out)
 }
 
+/// ViPr's own subtitles as an `.srt` file holds them, with the marks a right-to-left language needs.
+pub fn transcript_srt(t: &Transcript) -> String {
+    let cues = build_cues(t, &SubtitleOptions::default());
+    to_srt(&mark_rtl(&cues, &t.language))
+}
+
+/// A translation as an `.srt` file holds it.
+pub fn translation_srt(file: &TranslationFile) -> String {
+    to_srt(&mark_rtl(&translated_cues(file), &file.target))
+}
+
+/// The subtitle file ffmpeg reads while exporting. A fixed plain name in the folder ffmpeg runs in: a full Windows path
+/// would need escaping in a filter, and a wrong escape is a broken export.
+const BURN_SUBTITLES: &str = "vipr-export.srt";
+/// How the drawn subtitles look: white with a dark outline reads on any picture.
+const BURN_STYLE: &str = "FontName=Arial,FontSize=16,Outline=2,Shadow=1,MarginV=20";
+
+/// Writes `media` again as an MP4 at `out` with `srt` drawn onto the picture. `dirs` is the folder to work in and the
+/// file to write. The NVIDIA encoder goes first, and the processor takes over when it can't run. Writes to a `.part`
+/// file and renames it at the end, so a failed or cancelled export never leaves a broken video behind. `on_progress`
+/// receives 0..1.
+pub fn burn_subtitles(
+    ffmpeg: &Path,
+    media: &Path,
+    srt: &str,
+    dirs: (&Path, &Path),
+    duration: f64,
+    log: &Path,
+    on_progress: &mut dyn FnMut(f32),
+) -> Result<(), String> {
+    let (work_dir, out) = dirs;
+    let subs = work_dir.join(BURN_SUBTITLES);
+    fsio::write_atomic(&subs, srt.as_bytes())
+        .map_err(|e| format!("cannot write the subtitles: {e}"))?;
+    let part = out.with_extension("mp4.part");
+    let encoders: [&[&str]; 2] = [
+        &["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "21"],
+        &["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"],
+    ];
+    let mut result = Err("no encoder could run".to_string());
+    for encoder in encoders {
+        result = run_ffmpeg(
+            ffmpeg,
+            media,
+            encoder,
+            (work_dir, &part),
+            duration,
+            log,
+            on_progress,
+        );
+        if result.is_ok() || CANCELLED.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&subs);
+    match result {
+        Ok(()) => std::fs::rename(&part, out)
+            .map_err(|e| format!("could not save {} ({e})", out.display())),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
+}
+
+fn run_ffmpeg(
+    ffmpeg: &Path,
+    media: &Path,
+    encoder: &[&str],
+    dirs: (&Path, &Path),
+    duration: f64,
+    log: &Path,
+    on_progress: &mut dyn FnMut(f32),
+) -> Result<(), String> {
+    let (work_dir, part) = dirs;
+    let mut cmd = Command::new(ffmpeg);
+    cmd.current_dir(work_dir)
+        .args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .arg(media)
+        .args(["-map", "0:v:0", "-map", "0:a?", "-vf"])
+        .arg(format!(
+            "subtitles={BURN_SUBTITLES}:force_style='{BURN_STYLE}'"
+        ))
+        .args(encoder)
+        .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"])
+        .args([
+            "-movflags",
+            "+faststart",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-f",
+            "mp4",
+        ])
+        .arg(part)
+        .stdout(Stdio::piped());
+    match File::create(log) {
+        Ok(f) => cmd.stderr(Stdio::from(f)),
+        Err(_) => cmd.stderr(Stdio::null()),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // no console window
+    }
+    if CANCELLED.load(Ordering::SeqCst) {
+        return Err("Cancelled".into());
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("could not start ffmpeg: {e}"))?;
+    if let Ok(mut g) = RUNNING_WORKER.lock() {
+        *g = Some(child.id());
+    }
+    if let Some(stdout) = child.stdout.take() {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(done) = line
+                .strip_prefix("out_time_us=")
+                .and_then(|us| us.trim().parse::<f64>().ok())
+                .filter(|_| duration > 0.0)
+            {
+                on_progress((done / 1e6 / duration).clamp(0.0, 1.0) as f32);
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if let Ok(mut g) = RUNNING_WORKER.lock() {
+        *g = None;
+    }
+    if CANCELLED.load(Ordering::SeqCst) {
+        return Err("Cancelled".into());
+    }
+    if status.success() {
+        return Ok(());
+    }
+    let details = std::fs::read_to_string(log).unwrap_or_default();
+    if details.contains("matches no streams") {
+        return Err(
+            "this recording has no picture, so there is nothing to put the subtitles on.".into(),
+        );
+    }
+    Err(format!(
+        "ffmpeg could not make the video (exit code {:?}); details: {}",
+        status.code(),
+        log.display()
+    ))
+}
+
 /// ViPr's own subtitles as a worker or compare takes them. Ids are the position in `build_cues`, plus one.
 pub(crate) fn transcript_cues(t: &Transcript) -> Vec<TimedText> {
     build_cues(t, &SubtitleOptions::default())

@@ -33,8 +33,9 @@ pub struct Settings {
     pub active_profile: Option<String>,
 }
 
+/// Dark, as an editor's panels are, whatever the system uses. "system" still follows it when chosen.
 fn default_theme() -> String {
-    "system".into()
+    "dark".into()
 }
 fn yes() -> bool {
     true
@@ -93,6 +94,13 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_app_starts_dark_whatever_the_system_uses() {
+        assert_eq!(Settings::default().theme, "dark");
+        let saved_before: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(saved_before.theme, "dark");
+    }
 
     #[test]
     fn round_trip() {

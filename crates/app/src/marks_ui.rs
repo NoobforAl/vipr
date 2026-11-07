@@ -567,7 +567,12 @@ pub fn view<'a>(
         )
     };
     let mut title = row![
-        text("Timeline").size(14).color(t.text).width(Length::Fill),
+        text("Subtitles").size(14).color(t.text),
+        icons::info_tip(
+            "Click a line to jump there. The flag marks a line, and + adds a bookmark between two lines.",
+            t
+        ),
+        space::horizontal(),
         add(icons::BOOKMARK, "Bookmark", MarkKind::Bookmark),
         add(icons::FLAG, "Flag line", MarkKind::Flag),
     ]
@@ -595,11 +600,6 @@ pub fn view<'a>(
     {
         head = head.push(text(problem).size(12).color(t.bad));
     }
-    head = head.push(
-        text("Click a line to jump. The flag marks a line, + marks the gap between two lines.")
-            .size(12)
-            .color(t.muted),
-    );
     if cues.iter().any(|c| c.ai_edited) {
         let label = if state.show_changes {
             "Hide AI changes"

@@ -92,6 +92,9 @@ pub enum Finished {
         /// Rows that needed the AI and did not get a pick, because no model is available.
         not_judged: usize,
     },
+    Exported {
+        path: PathBuf,
+    },
     Chapters {
         count: usize,
         /// Parts of the recording the AI gave nothing usable for.
@@ -257,6 +260,16 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             );
             (Task::done(Msg::Tell(notice)), open)
         }
+        Finished::Exported { path } => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (
+                Task::none(),
+                Out::Notice(format!("Saved the video with subtitles: {name}")),
+            )
+        }
         Finished::Chapters {
             count,
             failed_windows,
@@ -350,6 +363,7 @@ fn label(kind: &JobKind) -> String {
         JobKind::Translate { target, .. } => format!("Translation to {}", language_name(target)),
         JobKind::Compare { .. } => "Subtitle compare".to_string(),
         JobKind::Chapters { .. } => "Finding chapters".to_string(),
+        JobKind::Export { .. } => "Exporting video".to_string(),
     }
 }
 
@@ -393,6 +407,7 @@ fn execute(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, String
         JobKind::Translate { target, source, .. } => translate(run, target, source, emit),
         JobKind::Compare { a, b, slug, .. } => compare(run, a, b, slug, emit),
         JobKind::Chapters { .. } => chapters(run, emit),
+        JobKind::Export { lang, out, .. } => export(run, lang.as_deref(), out, emit),
     }
 }
 
@@ -495,6 +510,47 @@ fn own_cues(paths: &ProjectPaths) -> Result<(Vec<TimedText>, String), String> {
 fn import_file(paths: &ProjectPaths, slug: &str) -> Result<ImportFile, String> {
     check_name(slug)?;
     fsio::load_json(&paths.import(slug)).map_err(|e| load_error("the imported subtitles", e))
+}
+
+// ------------------------------------------------------------------------- export
+
+fn export(
+    run: &Run,
+    lang: Option<&str>,
+    out: &Path,
+    emit: &mut dyn FnMut(RunEvent),
+) -> Result<Finished, String> {
+    let ffmpeg = engine::audio::find_ffmpeg()
+        .ok_or("putting subtitles on a video needs ffmpeg. Get it in Settings first.")?;
+    if !run.job.media.is_file() {
+        return Err("the video is not where it was. Open the player once to find it again.".into());
+    }
+    let paths = &run.job.paths;
+    let t = Transcript::load(&paths.transcript()).map_err(|e| load_error("the transcript", e))?;
+    let srt = match lang {
+        None => pipeline::transcript_srt(&t),
+        Some(code) => {
+            check_name(code)?;
+            let file: TranslationFile = fsio::load_json(&paths.translation(code))
+                .map_err(|e| load_error("the translation", e))?;
+            pipeline::translation_srt(&file)
+        }
+    };
+    emit(RunEvent::Detail(
+        "Putting the subtitles on the video".into(),
+    ));
+    pipeline::burn_subtitles(
+        &ffmpeg,
+        &run.job.media,
+        &srt,
+        (&paths.dir, out),
+        t.audio_seconds,
+        &paths.dir.join("export.log"),
+        &mut |done| emit(RunEvent::Progress(done)),
+    )?;
+    Ok(Finished::Exported {
+        path: out.to_path_buf(),
+    })
 }
 
 // ------------------------------------------------------------------------- chapters
