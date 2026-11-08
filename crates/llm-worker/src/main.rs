@@ -13,7 +13,7 @@
 //!
 //! Input JSON:
 //!   {"utterances":[{"id":1,"start":12.3,"speaker":"Speaker 1","text":"..."}],
-//!    "about":{"description":"...","speaker_names":{"Speaker 1":"Eric"},"category":"software-meeting"},
+//!    "about":{"description":"...","speaker_names":{"Speaker 1":"Alex"},"category":"software-meeting"},
 //!    "glossary":["Cloudflare"]}                                  (about / glossary optional)
 //! Output JSON:
 //!   {"utterances":[same ids, cleaned text / speaker],

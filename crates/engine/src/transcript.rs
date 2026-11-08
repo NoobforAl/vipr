@@ -464,15 +464,15 @@ mod tests {
                 speaker: 1,
             },
         ];
-        let t = Transcript::build("a.mp4", &a, Some(&turns), &["Eric".into()]);
+        let t = Transcript::build("a.mp4", &a, Some(&turns), &["Alex".into()]);
         assert_eq!(t.utterances.len(), 2);
         assert_eq!(t.utterances[0].text, "hello there.");
         assert_eq!(t.utterances[1].speaker, 1);
-        assert_eq!(t.speaker_name(0), "Eric");
+        assert_eq!(t.speaker_name(0), "Alex");
         assert_eq!(t.speaker_name(1), "Speaker 2");
         assert!(
             t.to_txt()
-                .starts_with("[00:00:00] Eric: hello there.\n[00:00:01] Speaker 2: hi yes.\n")
+                .starts_with("[00:00:00] Alex: hello there.\n[00:00:01] Speaker 2: hi yes.\n")
         );
     }
 

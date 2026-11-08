@@ -68,7 +68,7 @@ enum Cmd {
         /// File name without extension
         #[arg(long)]
         name: String,
-        /// Speaker names in order, e.g. --speaker Eric --speaker Farshad
+        /// Speaker names in order, e.g. --speaker Alex --speaker Sam
         #[arg(long = "speaker")]
         speakers: Vec<String>,
     },

@@ -2705,7 +2705,7 @@ impl App {
                         .spacing(12),
                         column![
                             text("Speaker names (optional, in the order they first speak, separated by commas)").size(12).color(t.muted),
-                            text_input("e.g. Eric, Farshad", &j.names_text).on_input(move |v| Message::SpeakerNames(id, v)).style(theme::input(t)).padding(9)
+                            text_input("e.g. Alex, Sam", &j.names_text).on_input(move |v| Message::SpeakerNames(id, v)).style(theme::input(t)).padding(9)
                         ]
                         .spacing(4),
                     ]
