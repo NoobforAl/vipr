@@ -9,12 +9,14 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use crate::export::{ExportOptions, Kind, SubtitleFormat, SubtitleMode};
+use crate::export::{ExportOptions, Frame, Kind, SeqInput, SubtitleFormat, SubtitleMode};
 use engine::chapters::transcript_lines;
 use engine::compare::{MAX_REASON_CHARS, check_merged, needs_llm};
 use engine::cuts::CutsFile;
 use engine::fsio;
+use engine::history::{Entry, Kind as Change};
 use engine::lang::clean_separators;
 use engine::profiles::Profile;
 use engine::project::{
@@ -96,10 +98,14 @@ pub enum Finished {
         not_judged: usize,
     },
     Exported {
+        /// The recording's, for the change log; `None` for a combination.
+        job: Option<u64>,
         path: PathBuf,
         /// Parts left out, and how long they were together.
         cuts: usize,
         cut_seconds: u64,
+        /// How long it took, in milliseconds.
+        millis: u64,
     },
     Chapters {
         count: usize,
@@ -245,12 +251,14 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
 fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
     match finished {
         Finished::Translated {
+            job,
             target,
             translated,
             untranslated,
             flagged,
-            ..
         } => {
+            let record = Entry::new(Change::Translated, language_name(&target))
+                .metric("cues", translated as f64);
             let mut notice = format!(
                 "Translated {translated} lines to {}.",
                 language_name(&target)
@@ -263,7 +271,10 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             if flagged > 0 {
                 notice.push_str(&format!(" {flagged} are worth checking."));
             }
-            (Task::none(), Out::Notice(notice))
+            (
+                Task::done(Msg::Tell(notice)),
+                Out::Record(Some(job), record),
+            )
         }
         Finished::Compared { job, not_judged } => {
             let open = Out::Open(Page::Review(job));
@@ -276,14 +287,20 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
             (Task::done(Msg::Tell(notice)), open)
         }
         Finished::Exported {
+            job,
             path,
             cuts,
             cut_seconds,
+            millis,
         } => {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+            let record = Entry::new(Change::Exported, name.clone())
+                .metric("bytes", bytes as f64)
+                .metric("elapsed_seconds", millis as f64 / 1000.0);
             let mut notice = format!("Saved {name}");
             if cuts > 0 {
                 notice.push_str(&format!(
@@ -292,7 +309,7 @@ fn finished_out(finished: Finished) -> (Task<Msg>, Out) {
                     engine::transcript::clock(cut_seconds as f64)
                 ));
             }
-            (Task::none(), Out::Notice(notice))
+            (Task::done(Msg::Tell(notice)), Out::Record(job, record))
         }
         Finished::Chapters {
             count,
@@ -388,6 +405,7 @@ fn label(kind: &JobKind) -> String {
         JobKind::Compare { .. } => "Subtitle compare".to_string(),
         JobKind::Chapters { .. } => "Finding chapters".to_string(),
         JobKind::Export { .. } => "Exporting video".to_string(),
+        JobKind::ExportSequence { name, .. } => format!("Exporting {}", clean_separators(name)),
     }
 }
 
@@ -432,6 +450,12 @@ fn execute(run: &Run, emit: &mut dyn FnMut(RunEvent)) -> Result<Finished, String
         JobKind::Compare { a, b, slug, .. } => compare(run, a, b, slug, emit),
         JobKind::Chapters { .. } => chapters(run, emit),
         JobKind::Export { options, out, .. } => export(run, options, out, emit),
+        JobKind::ExportSequence {
+            items,
+            options,
+            out,
+            ..
+        } => export_sequence(items, options, out, emit),
     }
 }
 
@@ -601,10 +625,13 @@ fn export(
     } else {
         Vec::new()
     };
-    let finished = Finished::Exported {
+    let started = Instant::now();
+    let finished = |cuts: &[engine::cuts::Cut]| Finished::Exported {
+        job: Some(run.job.id),
         path: out.to_path_buf(),
         cuts: cuts.len(),
-        cut_seconds: engine::cuts::removed(&cuts).round() as u64,
+        cut_seconds: engine::cuts::removed(cuts).round() as u64,
+        millis: started.elapsed().as_millis() as u64,
     };
     if options.kind == Kind::Subtitles {
         let text = pipeline::subtitle_text(
@@ -615,7 +642,7 @@ fn export(
         );
         fsio::write_atomic(out, text.as_bytes())
             .map_err(|e| format!("cannot write {} ({e})", out.display()))?;
-        return Ok(finished);
+        return Ok(finished(&cuts));
     }
 
     let ffmpeg = engine::audio::find_ffmpeg()
@@ -659,7 +686,169 @@ fn export(
         &paths.dir.join("export.log"),
         &mut |done| emit(RunEvent::Progress(done)),
     )?;
-    Ok(finished)
+    Ok(finished(&cuts))
+}
+
+/// One recording of a combination, read from its result folder.
+struct SeqPart {
+    input: SeqInput,
+    cues: Vec<engine::subtitles::Cue>,
+    lang: String,
+    probe: crate::player::probe::Probe,
+}
+
+/// Exports a combination: `items` one after another, each with its own cuts and subtitles, as one file.
+fn export_sequence(
+    items: &[JobRef],
+    options: &ExportOptions,
+    out: &Path,
+    emit: &mut dyn FnMut(RunEvent),
+) -> Result<Finished, String> {
+    let started = Instant::now();
+    let Some(first) = items.first() else {
+        return Err("the combination has no recordings.".into());
+    };
+    let ffmpeg = engine::audio::find_ffmpeg();
+    if options.kind != Kind::Subtitles && ffmpeg.is_none() {
+        return Err("exporting video or sound needs ffmpeg. Get it in Settings first.".into());
+    }
+    emit(RunEvent::Detail("Reading the recordings".into()));
+    let mut parts: Vec<SeqPart> = Vec::with_capacity(items.len());
+    for item in items {
+        let paths = &item.paths;
+        let what = |thing: &str| format!("{thing} of {}", paths.stem);
+        let t = Transcript::load(&paths.transcript())
+            .map_err(|e| load_error(&what("the transcript"), e))?;
+        // a recording without this translation shows its own words
+        let translation: Option<TranslationFile> = match &options.lang {
+            Some(code) if paths.translation(code).is_file() => {
+                check_name(code)?;
+                Some(
+                    fsio::load_json(&paths.translation(code))
+                        .map_err(|e| load_error(&what("the translation"), e))?,
+                )
+            }
+            _ => None,
+        };
+        let (cues, lang) = pipeline::export_cues(&t, translation.as_ref());
+        let cuts_path = paths.cuts();
+        let cuts = if options.apply_cuts && cuts_path.is_file() {
+            let file: CutsFile =
+                fsio::load_json(&cuts_path).map_err(|e| load_error(&what("the cuts"), e))?;
+            engine::cuts::normalize(&file.cuts, t.audio_seconds)
+        } else {
+            Vec::new()
+        };
+        if options.kind != Kind::Subtitles && !item.media.is_file() {
+            return Err(format!(
+                "the recording of {} is not where it was. Find it on Home first.",
+                paths.stem
+            ));
+        }
+        let probe = match (&ffmpeg, options.kind) {
+            (Some(ffmpeg), Kind::Video | Kind::Audio) => {
+                crate::player::run_probe(ffmpeg, &item.media)
+            }
+            _ => Default::default(),
+        };
+        parts.push(SeqPart {
+            input: SeqInput {
+                media: item.media.clone(),
+                duration: t.audio_seconds,
+                cuts,
+                has_audio: probe.has_audio(),
+            },
+            cues,
+            lang,
+            probe,
+        });
+    }
+    if options.kind == Kind::Video
+        && let Some(p) = parts.iter().find(|p| !p.probe.has_video)
+    {
+        return Err(format!(
+            "{} has no picture, so it can't be joined into a video. Export the sound instead.",
+            p.input
+                .media
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        ));
+    }
+
+    // every recording's subtitles on the joined timeline
+    let mut cues = Vec::new();
+    let mut offset = 0.0;
+    for p in &parts {
+        for c in pipeline::retime_cues(&p.cues, &p.input.cuts) {
+            cues.push(engine::subtitles::Cue {
+                start: c.start + offset,
+                end: c.end + offset,
+                ..c
+            });
+        }
+        offset += p.input.duration - engine::cuts::removed(&p.input.cuts);
+    }
+    let lang = parts
+        .iter()
+        .map(|p| p.lang.clone())
+        .find(|l| Some(l) == options.lang.as_ref())
+        .unwrap_or_else(|| parts[0].lang.clone());
+    let all_cuts: usize = parts.iter().map(|p| p.input.cuts.len()).sum();
+    let cut_seconds: f64 = parts
+        .iter()
+        .map(|p| engine::cuts::removed(&p.input.cuts))
+        .sum();
+    let finished = |started: Instant| Finished::Exported {
+        job: None,
+        path: out.to_path_buf(),
+        cuts: all_cuts,
+        cut_seconds: cut_seconds.round() as u64,
+        millis: started.elapsed().as_millis() as u64,
+    };
+    if options.kind == Kind::Subtitles {
+        let text = pipeline::subtitle_text(&cues, &lang, options.subtitle_format, &options.style);
+        fsio::write_atomic(out, text.as_bytes())
+            .map_err(|e| format!("cannot write {} ({e})", out.display()))?;
+        return Ok(finished(started));
+    }
+
+    let subtitles = options.subtitle_file().map(|ext| {
+        let format = if ext == "ass" {
+            SubtitleFormat::Ass
+        } else {
+            SubtitleFormat::Srt
+        };
+        (
+            pipeline::subtitle_text(&cues, &lang, format, &options.style),
+            ext,
+        )
+    });
+    let p0 = &parts[0].probe;
+    let (w, h) = p0.display_size();
+    let frame = Frame::for_export((w, h, p0.fps), options.resolution);
+    let inputs: Vec<SeqInput> = parts.into_iter().map(|p| p.input).collect();
+    emit(RunEvent::Detail(match options.kind {
+        Kind::Audio => format!("Joining the sound of {} recordings", inputs.len()),
+        _ => format!(
+            "Joining {} recordings into one {} video",
+            inputs.len(),
+            options.container.label()
+        ),
+    }));
+    let work_dir = &first.paths.dir;
+    pipeline::export_with(
+        ffmpeg.as_deref().expect("checked above"),
+        (
+            options,
+            subtitles.as_ref().map(|(text, ext)| (text.as_str(), *ext)),
+        ),
+        (work_dir, out),
+        offset,
+        &work_dir.join("export.log"),
+        &mut |done| emit(RunEvent::Progress(done)),
+        &|video, subs, part| options.sequence_ffmpeg_args(&inputs, frame, subs, video, part),
+    )?;
+    Ok(finished(started))
 }
 
 /// A frame of the recording with its subtitles drawn as `options` say, for the export dialog: PNG bytes, and the moment
@@ -1210,6 +1399,132 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A result folder with a transcript of one line at `at` seconds, for a recording `seconds` long.
+    fn result_folder(dir: &Path, stem: &str, seconds: f64, at: f64, line: &str) -> ProjectPaths {
+        let paths = ProjectPaths::new(dir.join(stem), stem.to_string());
+        let transcript = serde_json::json!({
+            "version": 1, "source": format!("{stem}.mp4"), "language": "en", "audio_seconds": seconds,
+            "speakers": [{"id": 0, "name": "Alex"}],
+            "utterances": [{"id": 1, "start": at, "end": at + 1.0, "speaker": 0,
+                            "raw_text": line, "text": line, "words": []}]
+        });
+        fsio::save_json(&paths.transcript(), &transcript).unwrap();
+        paths
+    }
+
+    /// Makes a test clip with ffmpeg: `size` at `fps`, with a tone or without sound.
+    fn clip(ffmpeg: &Path, out: &Path, seconds: u32, size: &str, fps: u32, sound: bool) {
+        let mut cmd = std::process::Command::new(ffmpeg);
+        cmd.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+        ])
+        .arg(format!(
+            "testsrc2=size={size}:rate={fps}:duration={seconds}"
+        ));
+        if sound {
+            cmd.args(["-f", "lavfi", "-i"])
+                .arg(format!("sine=frequency=440:duration={seconds}"));
+        }
+        cmd.args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ]);
+        if sound {
+            cmd.args(["-c:a", "aac"]);
+        }
+        assert!(cmd.arg(out).status().unwrap().success());
+    }
+
+    /// Runs the real export of a combination through ffmpeg: two recordings of different size and rate,
+    /// one with a cut and one without sound. Skipped where there is no ffmpeg.
+    #[test]
+    fn a_combination_exports_as_one_video_with_subtitles_at_the_joined_times() {
+        let Some(ffmpeg) = engine::audio::find_ffmpeg() else {
+            eprintln!("no ffmpeg here, skipped");
+            return;
+        };
+        let dir = TestDir::new("sequence");
+        let a_media = dir.0.join("a.mp4");
+        let b_media = dir.0.join("b.mp4");
+        clip(&ffmpeg, &a_media, 4, "640x360", 30, true);
+        clip(&ffmpeg, &b_media, 3, "320x240", 25, false);
+        let a = result_folder(&dir.0, "a", 4.0, 0.5, "first");
+        let b = result_folder(&dir.0, "b", 3.0, 1.0, "second");
+        // a loses 1 s in the middle
+        fsio::save_json(
+            &a.cuts(),
+            &serde_json::json!({"version": 1, "cuts": [{"start": 2.0, "end": 3.0}]}),
+        )
+        .unwrap();
+        let items = vec![
+            JobRef {
+                id: 1,
+                media: a_media,
+                paths: a,
+            },
+            JobRef {
+                id: 2,
+                media: b_media,
+                paths: b,
+            },
+        ];
+        let video = dir.0.join("joined.mp4");
+        let options = ExportOptions {
+            encoder: crate::export::Encoder::Cpu,
+            quality: crate::export::Quality::Small,
+            ..ExportOptions::default()
+        };
+        let done = export_sequence(&items, &options, &video, &mut |_| {}).unwrap();
+        assert!(
+            matches!(
+                done,
+                Finished::Exported {
+                    cuts: 1,
+                    cut_seconds: 1,
+                    job: None,
+                    ..
+                }
+            ),
+            "{done:?}"
+        );
+        let probe = crate::player::run_probe(&ffmpeg, &video);
+        assert_eq!(
+            (probe.width, probe.height),
+            (640, 360),
+            "the first recording's frame"
+        );
+        assert!(
+            probe.has_audio(),
+            "silence stands in for the second recording's sound"
+        );
+        let length = probe.duration_secs.unwrap();
+        assert!(
+            (length - 6.0).abs() < 0.2,
+            "4 s - 1 s cut + 3 s, got {length}"
+        );
+
+        // the subtitles on their own: the second recording's line moves by the first's kept 3 s
+        let subs = dir.0.join("joined.srt");
+        let srt = ExportOptions {
+            kind: Kind::Subtitles,
+            ..ExportOptions::default()
+        };
+        export_sequence(&items, &srt, &subs, &mut |_| {}).unwrap();
+        let text = std::fs::read_to_string(&subs).unwrap();
+        assert!(text.contains("00:00:00,500 --> 00:00:01,500"), "{text}");
+        assert!(text.contains("00:00:04,000 --> 00:00:05,000"), "{text}");
     }
 
     fn kind(target: &str) -> JobKind {

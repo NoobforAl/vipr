@@ -1,6 +1,6 @@
 //! What an export makes, and the ffmpeg command for it. Kept apart from the dialog so it can be tested on its own.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use engine::cuts::{self, Cut};
 use engine::style::SubtitleStyle;
@@ -377,19 +377,7 @@ impl ExportOptions {
                         ["-map", "1:0", "-c:s", self.container.subtitle_codec()].map(String::from),
                     );
                 }
-                a.extend(video.iter().cloned());
-                a.extend(["-pix_fmt", "yuv420p"].map(String::from));
-                a.extend(
-                    match self.container {
-                        Container::Webm => ["-c:a", "libopus", "-b:a", "128k"],
-                        _ => ["-c:a", "aac", "-b:a", "192k"],
-                    }
-                    .map(String::from),
-                );
-                if matches!(self.container, Container::Mp4 | Container::Mov) {
-                    a.extend(["-movflags", "+faststart"].map(String::from));
-                }
-                a.extend(["-f", self.container.ffmpeg_format()].map(String::from));
+                self.video_output(&mut a, video);
             }
             Kind::Audio | Kind::Subtitles => {
                 if cuts.is_empty() {
@@ -402,20 +390,191 @@ impl ExportOptions {
                         "[a]".to_string(),
                     ]);
                 }
-                a.push("-vn".to_string());
-                let (codec, format): (&[&str], &str) = match self.audio_format {
-                    AudioFormat::Mp3 => (&["-c:a", "libmp3lame", "-q:a", "2"], "mp3"),
-                    AudioFormat::M4a => (&["-c:a", "aac", "-b:a", "192k"], "ipod"),
-                    AudioFormat::Wav => (&["-c:a", "pcm_s16le"], "wav"),
-                    AudioFormat::Flac => (&["-c:a", "flac"], "flac"),
-                };
-                a.extend(codec.iter().map(|s| s.to_string()));
-                a.extend(["-f", format].map(String::from));
+                self.audio_output(&mut a);
             }
         }
         a.extend(["-progress", "pipe:1", "-nostats"].map(String::from));
         a.push(out.to_string_lossy().into_owned());
         a
+    }
+
+    /// Encoder, pixel format, sound codec and container of a video export.
+    fn video_output(&self, a: &mut Vec<String>, video: &[String]) {
+        a.extend(video.iter().cloned());
+        a.extend(["-pix_fmt", "yuv420p"].map(String::from));
+        a.extend(
+            match self.container {
+                Container::Webm => ["-c:a", "libopus", "-b:a", "128k"],
+                _ => ["-c:a", "aac", "-b:a", "192k"],
+            }
+            .map(String::from),
+        );
+        if matches!(self.container, Container::Mp4 | Container::Mov) {
+            a.extend(["-movflags", "+faststart"].map(String::from));
+        }
+        a.extend(["-f", self.container.ffmpeg_format()].map(String::from));
+    }
+
+    /// Codec and container of a sound-only export.
+    fn audio_output(&self, a: &mut Vec<String>) {
+        a.push("-vn".to_string());
+        let (codec, format): (&[&str], &str) = match self.audio_format {
+            AudioFormat::Mp3 => (&["-c:a", "libmp3lame", "-q:a", "2"], "mp3"),
+            AudioFormat::M4a => (&["-c:a", "aac", "-b:a", "192k"], "ipod"),
+            AudioFormat::Wav => (&["-c:a", "pcm_s16le"], "wav"),
+            AudioFormat::Flac => (&["-c:a", "flac"], "flac"),
+        };
+        a.extend(codec.iter().map(|s| s.to_string()));
+        a.extend(["-f", format].map(String::from));
+    }
+
+    /// The ffmpeg command for a combination: the recordings one after another, each with its own cuts, as one
+    /// file. Every picture is scaled into `frame` (bars where its shape differs) at one frame rate, and every sound
+    /// made 48 kHz stereo, since joining needs them all alike; a recording without sound gets silence. Subtitles
+    /// (`subtitles`, timed on the joined result) are drawn after joining.
+    pub fn sequence_ffmpeg_args(
+        &self,
+        inputs: &[SeqInput],
+        frame: Frame,
+        subtitles: Option<&str>,
+        video: &[String],
+        out: &Path,
+    ) -> Vec<String> {
+        let with_video = self.kind == Kind::Video;
+        let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-y"]
+            .map(String::from)
+            .to_vec();
+        for input in inputs {
+            a.extend(["-i".to_string(), input.media.to_string_lossy().into_owned()]);
+        }
+        let track = subtitles.filter(|_| with_video && self.subtitles == SubtitleMode::Track);
+        if let Some(file) = track {
+            a.extend(["-i".to_string(), file.to_string()]);
+        }
+        let range = |start: f64, end: Option<f64>| match end {
+            Some(end) => format!("start={start:.3}:end={end:.3}"),
+            None => format!("start={start:.3}"),
+        };
+        let Frame { width, height, fps } = frame;
+        let mut graph = String::new();
+        let mut joined = String::new();
+        let mut count = 0;
+        for (i, input) in inputs.iter().enumerate() {
+            let parts = cuts::kept(&input.cuts, input.duration);
+            let n = parts.len();
+            if with_video {
+                graph.push_str(&format!(
+                    "[{i}:v:0]scale={width}:{height}:force_original_aspect_ratio=decrease,\
+                     pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p,split={n}"
+                ));
+                for k in 0..n {
+                    graph.push_str(&format!("[vs{i}_{k}]"));
+                }
+                graph.push(';');
+            }
+            if input.has_audio {
+                graph.push_str(&format!(
+                    "[{i}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit={n}"
+                ));
+                for k in 0..n {
+                    graph.push_str(&format!("[as{i}_{k}]"));
+                }
+                graph.push(';');
+            }
+            for (k, (start, end)) in parts.iter().enumerate() {
+                if with_video {
+                    graph.push_str(&format!(
+                        "[vs{i}_{k}]trim={},setpts=PTS-STARTPTS[v{i}_{k}];",
+                        range(*start, *end)
+                    ));
+                    joined.push_str(&format!("[v{i}_{k}]"));
+                }
+                if input.has_audio {
+                    graph.push_str(&format!(
+                        "[as{i}_{k}]atrim={},asetpts=PTS-STARTPTS[a{i}_{k}];",
+                        range(*start, *end)
+                    ));
+                } else {
+                    let length = end.unwrap_or(input.duration) - start;
+                    graph.push_str(&format!(
+                        "anullsrc=r=48000:cl=stereo,atrim=duration={length:.3},\
+                         aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}_{k}];"
+                    ));
+                }
+                joined.push_str(&format!("[a{i}_{k}]"));
+                count += 1;
+            }
+        }
+        graph.push_str(&joined);
+        graph.push_str(&format!("concat=n={count}:v={}:a=1", u8::from(with_video)));
+        if with_video {
+            graph.push_str("[cv][a];");
+            match subtitles.filter(|_| self.subtitles == SubtitleMode::Burn) {
+                Some(file) => graph.push_str(&format!("[cv]subtitles={file}[v]")),
+                None => graph.push_str("[cv]null[v]"),
+            }
+        } else {
+            graph.push_str("[a]");
+        }
+        a.extend(["-filter_complex".to_string(), graph]);
+        if with_video {
+            a.extend(["-map", "[v]", "-map", "[a]"].map(String::from));
+            if track.is_some() {
+                a.extend([
+                    "-map".to_string(),
+                    format!("{}:0", inputs.len()),
+                    "-c:s".to_string(),
+                    self.container.subtitle_codec().to_string(),
+                ]);
+            }
+            self.video_output(&mut a, video);
+        } else {
+            a.extend(["-map", "[a]"].map(String::from));
+            self.audio_output(&mut a);
+        }
+        a.extend(["-progress", "pipe:1", "-nostats"].map(String::from));
+        a.push(out.to_string_lossy().into_owned());
+        a
+    }
+}
+
+/// One recording of a combination, as its export sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeqInput {
+    pub media: PathBuf,
+    /// Its length in seconds.
+    pub duration: f64,
+    /// [`cuts::normalize`]d, and empty when the cuts aren't applied.
+    pub cuts: Vec<Cut>,
+    pub has_audio: bool,
+}
+
+/// The picture of a combination: every recording is fitted into it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+}
+
+impl Frame {
+    /// The first recording's size and rate, or its proportions at the chosen height. As for one recording, a
+    /// smaller picture is never made larger. `first` is `(width, height, fps)`; zeros mean unknown.
+    pub fn for_export(first: (u32, u32, Option<f64>), resolution: Resolution) -> Frame {
+        let (w, h) = match (first.0, first.1) {
+            (0, _) | (_, 0) => (1280, 720),
+            size => size,
+        };
+        let height = resolution.height().map_or(h, |most| most.min(h));
+        let even = |v: f64| ((v.round() as u32) & !1).max(2);
+        Frame {
+            width: even(w as f64 * height as f64 / h as f64),
+            height: even(height as f64),
+            fps: first
+                .2
+                .filter(|f| f.is_finite() && *f > 0.0)
+                .unwrap_or(30.0),
+        }
     }
 }
 
@@ -425,6 +584,134 @@ mod tests {
 
     fn joined(args: &[String]) -> String {
         args.join(" ")
+    }
+
+    fn seq_inputs() -> Vec<SeqInput> {
+        vec![
+            SeqInput {
+                media: PathBuf::from("a.mp4"),
+                duration: 10.0,
+                cuts: vec![Cut {
+                    start: 2.0,
+                    end: 4.0,
+                }],
+                has_audio: true,
+            },
+            SeqInput {
+                media: PathBuf::from("b.mov"),
+                duration: 5.0,
+                cuts: Vec::new(),
+                has_audio: false,
+            },
+        ]
+    }
+
+    const FRAME: Frame = Frame {
+        width: 1280,
+        height: 720,
+        fps: 30.0,
+    };
+
+    #[test]
+    fn a_combination_joins_every_kept_part_of_every_recording() {
+        let o = ExportOptions::default();
+        let args =
+            o.sequence_ffmpeg_args(&seq_inputs(), FRAME, Some("s.ass"), &[], Path::new("o.mp4"));
+        let all = joined(&args);
+        assert!(
+            all.starts_with("-hide_banner -nostdin -y -i a.mp4 -i b.mov -filter_complex "),
+            "{all}"
+        );
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        // both fitted into one frame and rate, the cut recording split in two parts
+        assert!(graph.contains("[0:v:0]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,split=2[vs0_0][vs0_1];"), "{graph}");
+        assert!(
+            graph.contains("[vs0_0]trim=start=0.000:end=2.000"),
+            "{graph}"
+        );
+        assert!(graph.contains("[vs0_1]trim=start=4.000,"), "{graph}");
+        assert!(graph.contains("[1:v:0]scale=1280:720"), "{graph}");
+        // the silent recording gets silence of its own length
+        assert!(
+            graph.contains("anullsrc=r=48000:cl=stereo,atrim=duration=5.000"),
+            "{graph}"
+        );
+        assert!(!graph.contains("[1:a:0]"), "{graph}");
+        assert!(graph.contains("[v0_0][a0_0][v0_1][a0_1][v1_0][a1_0]concat=n=3:v=1:a=1[cv][a];[cv]subtitles=s.ass[v]"), "{graph}");
+        assert!(all.contains("-map [v] -map [a]"), "{all}");
+        assert!(all.ends_with("-progress pipe:1 -nostats o.mp4"), "{all}");
+    }
+
+    #[test]
+    fn a_combination_can_be_just_its_sound_or_carry_a_subtitle_track() {
+        let sound = ExportOptions {
+            kind: Kind::Audio,
+            ..ExportOptions::default()
+        };
+        let args = sound.sequence_ffmpeg_args(&seq_inputs(), FRAME, None, &[], Path::new("o.mp3"));
+        let all = joined(&args);
+        assert!(!all.contains(":v:0"), "no picture at all: {all}");
+        assert!(
+            all.contains("concat=n=3:v=0:a=1[a] -map [a] -vn -c:a libmp3lame"),
+            "{all}"
+        );
+
+        let track = ExportOptions {
+            subtitles: SubtitleMode::Track,
+            ..ExportOptions::default()
+        };
+        let all = joined(&track.sequence_ffmpeg_args(
+            &seq_inputs(),
+            FRAME,
+            Some("s.srt"),
+            &[],
+            Path::new("o.mp4"),
+        ));
+        assert!(all.contains("-i b.mov -i s.srt"), "{all}");
+        assert!(all.contains("[cv]null[v]"), "a track is not drawn: {all}");
+        assert!(all.contains("-map 2:0 -c:s mov_text"), "{all}");
+    }
+
+    #[test]
+    fn a_combination_takes_the_first_recordings_shape_and_never_enlarges_it() {
+        let frame = |first, r| Frame::for_export(first, r);
+        assert_eq!(
+            frame((1920, 1080, Some(60.0)), Resolution::Original),
+            Frame {
+                width: 1920,
+                height: 1080,
+                fps: 60.0
+            }
+        );
+        assert_eq!(
+            frame((1920, 1080, Some(60.0)), Resolution::P720),
+            Frame {
+                width: 1280,
+                height: 720,
+                fps: 60.0
+            }
+        );
+        assert_eq!(
+            frame((640, 480, None), Resolution::P1080),
+            Frame {
+                width: 640,
+                height: 480,
+                fps: 30.0
+            }
+        );
+        assert_eq!(
+            frame((1080, 1920, Some(30.0)), Resolution::P720).width,
+            404,
+            "upright, kept even"
+        );
+        assert_eq!(
+            frame((0, 0, None), Resolution::Original),
+            Frame {
+                width: 1280,
+                height: 720,
+                fps: 30.0
+            }
+        );
     }
 
     #[test]

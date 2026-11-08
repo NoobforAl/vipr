@@ -814,7 +814,32 @@ pub fn run_export(
     log: &Path,
     on_progress: &mut dyn FnMut(f32),
 ) -> Result<(), String> {
-    let (work_dir, out) = dirs;
+    export_with(
+        ffmpeg,
+        (options, subtitles),
+        dirs,
+        duration - engine::cuts::removed(cuts),
+        log,
+        on_progress,
+        &|video, name, part| options.ffmpeg_args(media, name, (duration, cuts), video, part),
+    )
+}
+
+/// The ffmpeg command for one attempt: the encoder settings, the subtitle file's name, and the file to write.
+pub type ExportArgs<'a> = dyn Fn(&[String], Option<&str>, &Path) -> Vec<String> + 'a;
+
+/// Runs an export: writes the subtitle file ffmpeg reads (`(text, ending)`) into `work_dir`, tries each of the
+/// options' encoders in turn with the command from `args`, and moves the finished `<out>.part` into place.
+/// `out_seconds` is the length of what comes out, for the progress.
+pub fn export_with(
+    ffmpeg: &Path,
+    (options, subtitles): (&ExportOptions, Option<(&str, &str)>),
+    (work_dir, out): (&Path, &Path),
+    out_seconds: f64,
+    log: &Path,
+    on_progress: &mut dyn FnMut(f32),
+    args: &ExportArgs<'_>,
+) -> Result<(), String> {
     let name = subtitles.map(|(_, ext)| format!("{EXPORT_SUBTITLES}.{ext}"));
     let subs = work_dir.join(name.as_deref().unwrap_or(EXPORT_SUBTITLES));
     if let Some((text, _)) = subtitles {
@@ -822,10 +847,9 @@ pub fn run_export(
             .map_err(|e| format!("cannot write the subtitles: {e}"))?;
     }
     let part = out.with_extension(format!("{}.part", options.extension()));
-    let out_seconds = duration - engine::cuts::removed(cuts);
     let mut result = Err("no encoder could run".to_string());
     for video in options.video_attempts() {
-        let args = options.ffmpeg_args(media, name.as_deref(), (duration, cuts), &video, &part);
+        let args = args(&video, name.as_deref(), &part);
         result = run_ffmpeg(ffmpeg, work_dir, &args, out_seconds, log, on_progress);
         if result.is_ok() || CANCELLED.load(Ordering::SeqCst) {
             break;

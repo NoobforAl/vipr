@@ -4,7 +4,7 @@
 //! clock, `surface` draws frames on Iced's device, `probe` reads what the file holds and `subs` loads
 //! the subtitle tracks.
 
-mod probe;
+pub(crate) mod probe;
 mod session;
 mod subs;
 mod surface;
@@ -229,7 +229,8 @@ where
     Task::perform(async move { rx.await.ok() }, done)
 }
 
-fn run_probe(ffmpeg: &std::path::Path, input: &std::path::Path) -> Probe {
+/// What ffmpeg says about `input`: size, rate, rotation, sound. Empty when it can't run.
+pub(crate) fn run_probe(ffmpeg: &std::path::Path, input: &std::path::Path) -> Probe {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-nostdin", "-i"]).arg(input);
     #[cfg(windows)]

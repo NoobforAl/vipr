@@ -37,6 +37,8 @@ pub enum Out {
     Alert(String),
     /// Open the export dialog for a job, with the translation `lang` chosen (`None`: the original).
     ExportVideo { job: u64, lang: Option<String> },
+    /// Write this to the open project's change log, about `job`'s recording if one is given.
+    Record(Option<u64>, engine::history::Entry),
 }
 
 /// Background work on a finished job's results.
@@ -63,6 +65,15 @@ pub enum JobKind {
         options: crate::export::ExportOptions,
         out: PathBuf,
     },
+    /// Like `Export`, for a combination: `items` one after another, each with its own cuts. `job` is the
+    /// first one's, whose result folder the work happens in.
+    ExportSequence {
+        job: u64,
+        name: String,
+        items: Vec<JobRef>,
+        options: crate::export::ExportOptions,
+        out: PathBuf,
+    },
 }
 
 impl JobKind {
@@ -71,7 +82,8 @@ impl JobKind {
             JobKind::Translate { job, .. }
             | JobKind::Compare { job, .. }
             | JobKind::Chapters { job }
-            | JobKind::Export { job, .. } => *job,
+            | JobKind::Export { job, .. }
+            | JobKind::ExportSequence { job, .. } => *job,
         }
     }
 }

@@ -35,6 +35,8 @@ pub struct State {
     preview: Option<(image::Handle, f64, ExportOptions)>,
     previewing: bool,
     preview_error: Option<String>,
+    /// Set when exporting a combination: its name, and its recordings in order. `job` is then the first.
+    sequence: Option<(String, Vec<JobRef>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +103,42 @@ pub fn open(
     if !gpu && state.options.encoder == Encoder::Gpu {
         state.options.encoder = Encoder::Auto;
     }
+    state.sequence = None;
     state.job = Some(job);
+}
+
+/// Opens the dialog for a combination: `items` one after another. The preview shows the first; the
+/// languages are the first one's (a recording without the chosen translation shows its own words), and the
+/// cuts are all of theirs, laid end to end, for the summary. `durations` are the recordings' lengths.
+pub fn open_sequence(
+    state: &mut State,
+    name: String,
+    items: Vec<JobRef>,
+    durations: &[f64],
+    (lang, style): (Option<String>, SubtitleStyle),
+    gpu: bool,
+) {
+    let Some(first) = items.first().cloned() else {
+        return;
+    };
+    let total: f64 = durations.iter().sum();
+    open(state, first, (lang, style), total, gpu);
+    let mut all = Vec::new();
+    let mut offset = 0.0;
+    for (item, duration) in items.iter().zip(durations) {
+        let own = std::fs::read_to_string(item.paths.cuts())
+            .ok()
+            .and_then(|text| serde_json::from_str::<CutsFile>(&text).ok())
+            .map(|file| cuts::normalize(&file.cuts, *duration))
+            .unwrap_or_default();
+        all.extend(own.into_iter().map(|c| Cut {
+            start: c.start + offset,
+            end: c.end + offset,
+        }));
+        offset += duration;
+    }
+    state.cuts = all;
+    state.sequence = Some((name, items));
 }
 
 pub fn is_open(state: &State) -> bool {
@@ -111,7 +148,10 @@ pub fn is_open(state: &State) -> bool {
 pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
     let o = &mut state.options;
     match msg {
-        Msg::Close => state.job = None,
+        Msg::Close => {
+            state.job = None;
+            state.sequence = None;
+        }
         Msg::Kind(k) => o.kind = k,
         Msg::Container(c) => o.container = c,
         Msg::Codec(c) => o.codec = c,
@@ -171,7 +211,14 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
             };
             let dir = job.media.parent().map(std::path::Path::to_path_buf);
             let ext = state.options.extension();
-            let name = format!("{}.{ext}", file_name(job, &state.options, &state.languages));
+            let stem = match &state.sequence {
+                Some((name, _)) => name.clone(),
+                None => job.paths.stem.clone(),
+            };
+            let name = format!(
+                "{}.{ext}",
+                file_name(&stem, &state.options, &state.languages)
+            );
             return (Task::perform(pick(dir, name, ext), Msg::Chosen), Out::None);
         }
         Msg::Chosen(None) => {}
@@ -180,16 +227,29 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
                 return (Task::none(), Out::None);
             };
             let path = path.with_extension(state.options.extension());
-            if path == job.media {
+            let replaces_a_recording = match &state.sequence {
+                Some((_, items)) => items.iter().any(|i| i.media == path),
+                None => path == job.media,
+            };
+            if replaces_a_recording {
                 state.error = Some(
                     "The export can't replace the recording itself. Choose another name.".into(),
                 );
                 return (Task::none(), Out::None);
             }
-            let kind = JobKind::Export {
-                job: job.id,
-                options: state.options.clone(),
-                out: path,
+            let kind = match state.sequence.take() {
+                Some((name, items)) => JobKind::ExportSequence {
+                    job: job.id,
+                    name,
+                    items,
+                    options: state.options.clone(),
+                    out: path,
+                },
+                None => JobKind::Export {
+                    job: job.id,
+                    options: state.options.clone(),
+                    out: path,
+                },
             };
             state.job = None;
             return (Task::none(), Out::Enqueue(kind));
@@ -200,13 +260,25 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
 }
 
 /// A name to start the save dialog with, without its ending.
-fn file_name(job: &JobRef, o: &ExportOptions, languages: &[(String, String)]) -> String {
+fn file_name(stem: &str, o: &ExportOptions, languages: &[(String, String)]) -> String {
     let language = language_name(o, languages);
+    // a combination's name is typed by the user, so it must stay a plain file name
+    let stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let stem = stem.trim();
     match o.kind {
-        Kind::Video if o.subtitles == SubtitleMode::Off => format!("{} (export)", job.paths.stem),
-        Kind::Video => format!("{} - {language} subtitles", job.paths.stem),
-        Kind::Subtitles => format!("{} - {language}", job.paths.stem),
-        Kind::Audio => format!("{} (sound)", job.paths.stem),
+        Kind::Video if o.subtitles == SubtitleMode::Off => format!("{stem} (export)"),
+        Kind::Video => format!("{stem} - {language} subtitles"),
+        Kind::Subtitles => format!("{stem} - {language}"),
+        Kind::Audio => format!("{stem} (sound)"),
     }
 }
 

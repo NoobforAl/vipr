@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 
 use engine::history::{Entry, HistoryLog, Kind, Undo};
 use engine::workspace::{self, ResultRef, Workspace};
-use iced::widget::{button, column, container, pick_list, row, scrollable, text};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::theme::{self, Tokens};
-use crate::{App, Job, JobState, Message, icons, import_ui, jobs, saver, semibold};
+use crate::{App, Job, JobState, Message, export_ui, icons, import_ui, jobs, saver, semibold};
 
 /// Recent projects remembered for the Open list.
 const RECENT_MAX: usize = 8;
@@ -121,6 +121,16 @@ pub enum Msg {
     Undo,
     Redo,
     ToggleHistory,
+    /// A new combination of all the recordings, in their order.
+    SeqNew,
+    SeqRename(u64, String),
+    SeqAdd(u64, ClipChoice),
+    /// Move the item at an index of a combination.
+    SeqMove(u64, usize, isize),
+    SeqRemoveItem(u64, usize),
+    SeqDelete(u64),
+    /// Open the export dialog for a combination.
+    SeqExport(u64),
     /// Answers to "save changes?".
     AnswerSave,
     AnswerDiscard,
@@ -134,6 +144,19 @@ pub struct Recent(pub PathBuf);
 impl fmt::Display for Recent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", crate::clean_separators(&file_stem(&self.0)))
+    }
+}
+
+/// A recording offered in a combination's "Add" list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipChoice {
+    id: u64,
+    title: String,
+}
+
+impl fmt::Display for ClipChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", crate::clean_separators(&self.title))
     }
 }
 
@@ -757,6 +780,62 @@ impl App {
                 self.ws_persist();
                 self.ws_sync_jobs()
             }
+            Msg::SeqNew => {
+                let open = self.ws_open();
+                let n = open.data.sequences.len() + 1;
+                let clips: Vec<u64> = open.data.clips.iter().map(|c| c.id).collect();
+                self.ws_snapshot("New combination");
+                let data = &mut self.ws_open().data;
+                let id = data.add_sequence(format!("Combination {n}"));
+                for clip in clips {
+                    data.push_to_sequence(id, clip);
+                }
+                self.ws_log(Entry::new(Kind::SequenceAdded, format!("Combination {n}")));
+                self.ws_persist();
+                Task::none()
+            }
+            Msg::SeqRename(id, name) => {
+                // each letter is no step of its own for Undo, and the log gets the name once exporting
+                let name = crate::clean_separators(&name);
+                if let Some(seq) = self.ws_open().data.sequence_mut(id)
+                    && seq.name != name
+                {
+                    seq.name = name;
+                    self.ws_persist();
+                }
+                Task::none()
+            }
+            Msg::SeqAdd(id, choice) => self.ws_seq_change(id, "Add to a combination", |d| {
+                d.push_to_sequence(id, choice.id)
+            }),
+            Msg::SeqMove(id, at, by) => {
+                self.ws_seq_change(id, "Change a combination's order", |d| {
+                    d.move_in_sequence(id, at, by)
+                })
+            }
+            Msg::SeqRemoveItem(id, at) => {
+                self.ws_seq_change(id, "Take out of a combination", |d| {
+                    d.remove_from_sequence(id, at)
+                })
+            }
+            Msg::SeqDelete(id) => {
+                let name = self
+                    .ws_open()
+                    .data
+                    .sequence(id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.ws_snapshot("Delete a combination");
+                if self.ws_open().data.remove_sequence(id) {
+                    self.ws_log(Entry::new(Kind::SequenceRemoved, name));
+                    self.ws_persist();
+                }
+                Task::none()
+            }
+            Msg::SeqExport(id) => {
+                self.ws_export_sequence(id);
+                Task::none()
+            }
             Msg::ToggleHistory => {
                 self.workspace.history_open = !self.workspace.history_open;
                 Task::none()
@@ -955,6 +1034,237 @@ impl App {
             .width(Length::Fill)
             .style(theme::card(t))
             .into()
+    }
+
+    fn ws_seq_change(
+        &mut self,
+        id: u64,
+        what: &str,
+        change: impl FnOnce(&mut Workspace) -> bool,
+    ) -> Task<Message> {
+        let before = self.ws_open().data.clone();
+        if change(&mut self.ws_open().data) {
+            self.workspace.undo.record(what, before);
+            let name = self
+                .ws_open()
+                .data
+                .sequence(id)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            self.ws_log(Entry::new(Kind::SequenceChanged, name));
+            self.ws_persist();
+        }
+        Task::none()
+    }
+
+    /// The finished job of each item of a combination, or the title of the first that isn't ready.
+    fn ws_sequence_jobs(&self, id: u64) -> Result<Vec<u64>, String> {
+        let open = self.workspace.open.as_ref().ok_or_else(String::new)?;
+        let seq = open.data.sequence(id).ok_or_else(String::new)?;
+        seq.items
+            .iter()
+            .map(|clip| {
+                let title = open.data.clip(*clip).map(|c| c.title()).unwrap_or_default();
+                self.jobs
+                    .iter()
+                    .find(|j| {
+                        j.clip == Some(*clip) && j.state == JobState::Done && j.paths.is_some()
+                    })
+                    .map(|j| j.id)
+                    .ok_or(title)
+            })
+            .collect()
+    }
+
+    fn ws_export_sequence(&mut self, id: u64) {
+        let Some(name) = self
+            .workspace
+            .open
+            .as_ref()
+            .and_then(|o| o.data.sequence(id))
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
+        let jobs = match self.ws_sequence_jobs(id) {
+            Ok(jobs) if !jobs.is_empty() => jobs,
+            Ok(_) => {
+                self.tell("Add recordings to the combination first.");
+                return;
+            }
+            Err(title) => {
+                self.tell(&format!(
+                    "Every recording in a combination has to be transcribed first, and {title} isn't yet."
+                ));
+                return;
+            }
+        };
+        let items: Vec<crate::JobRef> = jobs.iter().filter_map(|j| self.job_ref(*j)).collect();
+        if let Some(gone) = items.iter().find(|i| !i.media.is_file()) {
+            self.alert(&format!(
+                "The recording {} is not where it was. Find it first.",
+                crate::file_name(&gone.media)
+            ));
+            return;
+        }
+        let durations: Vec<f64> = jobs
+            .iter()
+            .map(|j| {
+                self.job(*j)
+                    .and_then(|j| j.transcript.as_ref())
+                    .map_or(0.0, |t| t.audio_seconds)
+            })
+            .collect();
+        let gpu = self
+            .detection
+            .as_ref()
+            .is_none_or(|d| d.recommended == gpu_detect::Backend::Cuda);
+        let style = self.settings.subtitle_style.clone();
+        export_ui::open_sequence(
+            &mut self.export,
+            name,
+            items,
+            &durations,
+            (None, style),
+            gpu,
+        );
+    }
+
+    /// The combinations on Home, below the recordings. `None` while the project has no recordings.
+    pub(crate) fn ws_combinations(&self, t: Tokens) -> Option<Element<'_, Message>> {
+        let open = self.workspace.open.as_ref()?;
+        if open.data.clips.is_empty() {
+            return None;
+        }
+        let data = &open.data;
+        let small = |label: &'static str, msg: Option<Msg>| {
+            button(text(label).size(12))
+                .padding([5, 10])
+                .style(theme::ghost(t))
+                .on_press_maybe(msg.map(Message::Workspace))
+        };
+        let icon_btn = |icon: &'static str, msg: Option<Msg>| {
+            button(icons::icon(
+                icon,
+                13.0,
+                if msg.is_some() { t.muted } else { t.faint },
+            ))
+            .padding(5)
+            .style(theme::ghost(t))
+            .on_press_maybe(msg.map(Message::Workspace))
+        };
+        let mut col = column![
+            row![
+                column![
+                    text("Combinations").size(15).font(semibold()).color(t.text),
+                    text("Join recordings into one video, one after another. Each keeps its own cuts.")
+                        .size(12)
+                        .color(t.muted),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                button(text("New combination").size(13))
+                    .padding([7, 12])
+                    .style(theme::outline_btn(t))
+                    .on_press(Message::Workspace(Msg::SeqNew)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(12);
+        let choices: Vec<ClipChoice> = data
+            .clips
+            .iter()
+            .map(|c| ClipChoice {
+                id: c.id,
+                title: c.title(),
+            })
+            .collect();
+        for seq in &data.sequences {
+            let id = seq.id;
+            let ready = self.ws_sequence_jobs(id).is_ok_and(|j| !j.is_empty());
+            let mut card = column![
+                row![
+                    text_input("Name", &seq.name)
+                        .on_input(move |v| Message::Workspace(Msg::SeqRename(id, v)))
+                        .style(theme::input(t))
+                        .padding(7)
+                        .size(13)
+                        .width(Length::Fill),
+                    button(text("Export...").size(13))
+                        .padding([7, 12])
+                        .style(theme::primary(t))
+                        .on_press_maybe(ready.then_some(Message::Workspace(Msg::SeqExport(id)))),
+                    small("Delete", Some(Msg::SeqDelete(id))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+            ]
+            .spacing(6);
+            let mut length = 0.0;
+            for (at, clip) in seq.items.iter().enumerate() {
+                let title = data.clip(*clip).map(|c| c.title()).unwrap_or_default();
+                let job = self.jobs.iter().find(|j| j.clip == Some(*clip));
+                let state = match job.map(|j| (&j.state, j.transcript.as_ref())) {
+                    Some((JobState::Done, Some(t))) => {
+                        length += t.audio_seconds;
+                        crate::clock(t.audio_seconds)
+                    }
+                    _ => "not transcribed yet".to_string(),
+                };
+                card = card.push(
+                    row![
+                        text(format!("{}.", at + 1)).size(12).color(t.faint),
+                        text(crate::clean_separators(&title))
+                            .size(13)
+                            .color(t.text)
+                            .width(Length::Fill),
+                        text(state).size(12).color(t.muted),
+                        icon_btn(
+                            icons::CHEVRON_UP,
+                            (at > 0).then_some(Msg::SeqMove(id, at, -1))
+                        ),
+                        icon_btn(
+                            icons::CHEVRON_DOWN,
+                            (at + 1 < seq.items.len()).then_some(Msg::SeqMove(id, at, 1))
+                        ),
+                        icon_btn(icons::X, Some(Msg::SeqRemoveItem(id, at))),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+            if seq.items.is_empty() {
+                card = card.push(text("No recordings yet.").size(12).color(t.muted));
+            }
+            card = card.push(
+                row![
+                    pick_list(choices.clone(), None::<ClipChoice>, move |c| {
+                        Message::Workspace(Msg::SeqAdd(id, c))
+                    })
+                    .placeholder("Add a recording")
+                    .text_size(12)
+                    .padding([5, 9])
+                    .style(theme::pick(t)),
+                    iced::widget::space::horizontal(),
+                    text(if length > 0.0 {
+                        format!("{} before cuts", crate::clock(length))
+                    } else {
+                        String::new()
+                    })
+                    .size(12)
+                    .color(t.muted),
+                ]
+                .align_y(Alignment::Center),
+            );
+            col = col.push(
+                container(card)
+                    .padding(12)
+                    .width(Length::Fill)
+                    .style(theme::card(t)),
+            );
+        }
+        Some(col.into())
     }
 
     /// Up / down buttons for a recording's card.
@@ -1236,6 +1546,41 @@ mod tests {
         let err = app.ws_save_to(temp_dir.join("Mine.vipr")).unwrap_err();
         assert!(err.contains("unsaved projects"), "{err}");
         assert!(app.workspace.open.as_ref().unwrap().temporary());
+    }
+
+    #[test]
+    fn combinations_are_made_changed_undone_and_wait_for_transcripts() {
+        let dir = TestDir::new("combine");
+        let mut app = app_in(&dir);
+        for (id, name) in [(1, "a.mp4"), (2, "b.mp4")] {
+            let media = dir.0.join(name);
+            std::fs::write(&media, b"x").unwrap();
+            app.jobs.push(Job::new(id, media, 1));
+        }
+        app.ws_jobs_added(&[1, 2]);
+        let _ = app.ws_update(Msg::SeqNew);
+        let data = |app: &App| app.workspace.open.as_ref().unwrap().data.clone();
+        let seq = data(&app).sequences[0].clone();
+        assert_eq!(seq.name, "Combination 1");
+        assert_eq!(seq.items.len(), 2, "starts with every recording, in order");
+
+        let _ = app.ws_update(Msg::SeqMove(seq.id, 1, -1));
+        let _ = app.ws_update(Msg::SeqRemoveItem(seq.id, 1));
+        assert_eq!(data(&app).sequences[0].items, [seq.items[1]]);
+        let _ = app.ws_update(Msg::Undo);
+        assert_eq!(data(&app).sequences[0].items, [seq.items[1], seq.items[0]]);
+        let _ = app.ws_update(Msg::SeqRename(seq.id, "Week 12".into()));
+        assert_eq!(data(&app).sequences[0].name, "Week 12");
+
+        // nothing is transcribed yet, so the export dialog doesn't open
+        let _ = app.ws_update(Msg::SeqExport(seq.id));
+        assert!(!export_ui::is_open(&app.export));
+        assert!(app.ws_sequence_jobs(seq.id).is_err());
+
+        let _ = app.ws_update(Msg::SeqDelete(seq.id));
+        assert!(data(&app).sequences.is_empty());
+        let _ = app.ws_update(Msg::Undo);
+        assert_eq!(data(&app).sequences.len(), 1, "deleting can be undone");
     }
 
     #[test]

@@ -815,6 +815,16 @@ impl App {
                 Task::none()
             }
             Out::ExportVideo { job, lang } => self.ask_export(job, lang),
+            Out::Record(job, entry) => {
+                let entry = match job.and_then(|j| self.ws_clip_of(j)) {
+                    Some(clip) => entry.clip(clip),
+                    None => entry,
+                };
+                if self.workspace.open.is_some() {
+                    self.ws_log(entry);
+                }
+                Task::none()
+            }
         }
     }
 
@@ -1000,7 +1010,7 @@ impl App {
             out::JobKind::Compare { .. } | out::JobKind::Chapters { .. } => {
                 self.model_path(Role::Llm)
             }
-            out::JobKind::Export { .. } => None,
+            out::JobKind::Export { .. } | out::JobKind::ExportSequence { .. } => None,
         };
         let context = jobs::JobContext {
             job: self.job_ref(kind.job()),
@@ -1862,7 +1872,10 @@ impl App {
             Message::Export(msg) => {
                 let (task, out) = export_ui::update(&mut self.export, msg);
                 // the next export starts from the style this one used
-                if let Out::Enqueue(out::JobKind::Export { options, .. }) = &out
+                if let Out::Enqueue(
+                    out::JobKind::Export { options, .. }
+                    | out::JobKind::ExportSequence { options, .. },
+                ) = &out
                     && options.style != self.settings.subtitle_style
                 {
                     self.settings.subtitle_style = options.style.clone();
@@ -2480,6 +2493,9 @@ impl App {
             for j in &self.jobs {
                 page = page.push(self.job_card(j));
             }
+        }
+        if let Some(combinations) = self.ws_combinations(t) {
+            page = page.push(combinations);
         }
 
         scrollable(
