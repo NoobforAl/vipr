@@ -1,6 +1,10 @@
 //! Runs one recording through the worker processes and writes the results.
 //!
-//!   asr-worker  ->  (diar-worker)  ->  merge  ->  (llm-worker)  ->  .json / .txt / .srt / .vtt
+//!   asr-worker + (diar-worker, alongside)  ->  merge  ->  (llm-worker)  ->  .json / .txt / .srt / .vtt
+//!
+//! Speaker detection runs beside speech recognition (that one is mostly the GPU, this the CPU), starting as soon as
+//! asr-worker has decoded the recording and saved it as 16 kHz audio, which it reads instead of decoding the video
+//! again.
 //!
 //! Speaker detection and the AI cleanup are optional: when their model or worker is missing, or they
 //! fail, the job continues without them and says so. Speech recognition is required.
@@ -9,8 +13,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
 
 use crate::export::{Encoder, ExportOptions, SubtitleFormat};
 use engine::cuts::Cut;
@@ -110,7 +114,8 @@ pub fn open_in_file_manager(path: &Path) {
     let _ = Command::new(cmd.0).arg(cmd.1).spawn();
 }
 
-static RUNNING_WORKER: Mutex<Option<u32>> = Mutex::new(None);
+/// Worker processes running now: usually one, two while speaker detection runs beside transcription.
+static RUNNING_WORKERS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Forget an earlier cancel; call before a job starts.
@@ -124,10 +129,39 @@ pub fn request_cancel() {
     kill_running_worker();
 }
 
-/// Kill the running worker process (used by Cancel and when the app closes, so nothing keeps the GPU busy).
+/// Keeps a worker in `RUNNING_WORKERS` until dropped, so an early return cannot leave a stale process id behind
+/// (one a later Cancel would kill after the system has reused it).
+struct Tracked(u32);
+
+impl Tracked {
+    fn new(pid: u32) -> Self {
+        if let Ok(mut g) = RUNNING_WORKERS.lock() {
+            g.push(pid);
+        }
+        Self(pid)
+    }
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        if let Ok(mut g) = RUNNING_WORKERS.lock() {
+            g.retain(|&p| p != self.0);
+        }
+    }
+}
+
+/// Kill the running worker processes (used by Cancel and when the app closes, so nothing keeps the GPU busy).
 pub fn kill_running_worker() {
-    let pid = RUNNING_WORKER.lock().ok().and_then(|g| *g);
-    let Some(pid) = pid else { return };
+    let pids = RUNNING_WORKERS
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    for pid in pids {
+        kill_pid(pid);
+    }
+}
+
+fn kill_pid(pid: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -174,9 +208,7 @@ pub(crate) fn run_worker(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start {name}: {e}"))?;
-    if let Ok(mut g) = RUNNING_WORKER.lock() {
-        *g = Some(child.id());
-    }
+    let tracked = Tracked::new(child.id());
     let stdout = child.stdout.take().ok_or("no worker output")?;
 
     let mut done: Option<Value> = None;
@@ -200,9 +232,7 @@ pub(crate) fn run_worker(
         on_event(&v);
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    if let Ok(mut g) = RUNNING_WORKER.lock() {
-        *g = None;
-    }
+    drop(tracked);
     if CANCELLED.load(Ordering::SeqCst) {
         return Err("Cancelled".into());
     }
@@ -442,72 +472,133 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
     if let Some(g) = &input.glossary {
         args.extend(["--glossary".into(), s(g)]);
     }
-    run_worker(
-        &asr_exe,
-        &args,
-        &dir.join("asr-worker.log"),
-        &mut |v| match v.get("event").and_then(Value::as_str) {
-            Some("audio") => {
-                let secs = v.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
-                emit(Event::Detail(format!(
-                    "Audio ready ({}). Loading the speech model",
-                    engine::transcript::clock(secs)
-                )));
+    // the speaker step reads the audio ASR already decoded instead of decoding the video a second time;
+    // removed when this run ends, however it ends
+    let shared_audio = diar_exe
+        .as_ref()
+        .map(|_| TempFile(dir.join(format!("{stem}.16k.wav"))));
+    if let Some(a) = &shared_audio {
+        args.extend(["--save-audio".into(), s(&a.0)]);
+    }
+    // the speaker worker, less its --audio; it runs beside transcription (that is mostly the GPU, this the CPU)
+    let diar_out = dir.join(format!("{stem}.turns.json"));
+    let diar = diar_exe
+        .as_ref()
+        .zip(input.diar_models.as_ref())
+        .map(|(exe, (seg, emb))| {
+            let mut args = vec![
+                "--segmentation".into(),
+                s(seg),
+                "--embedding".into(),
+                s(emb),
+                "--out".into(),
+                s(&diar_out),
+            ];
+            // 0 = Auto: the worker works out how many people are talking
+            if input.num_speakers > 0 {
+                args.extend(["--num-speakers".into(), input.num_speakers.to_string()]);
             }
-            Some("model_loaded") => emit(Event::Detail("Looking for the parts with speech".into())),
-            Some("vad") => {
-                let n = v.get("regions").and_then(Value::as_u64).unwrap_or(0);
-                let sp = v
-                    .get("speech_seconds")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
-                emit(Event::Detail(format!(
-                    "Found {n} stretches of speech ({sp:.0} s). Writing down the words"
-                )));
-            }
-            Some("progress") => emit(Event::Progress {
-                step: pct_of(v),
-                overall: overall_progress(&steps, step, pct_of(v)),
-            }),
-            _ => {}
-        },
-    )
-    .map_err(|e| friendly_error(&file_name, &e))?;
-    step += 1;
-    let asr = AsrResult::load(&asr_json).map_err(|e| e.to_string())?;
-
-    // 2. who speaks when (optional)
-    let mut turns: Option<Vec<SpeakerTurn>> = None;
-    if let (Some(exe), Some((seg, emb))) = (&diar_exe, &input.diar_models) {
-        emit(Event::Step(step));
-        emit(Event::Detail("Loading the speaker models".into()));
-        let out = dir.join(format!("{stem}.turns.json"));
-        let mut args = vec![
-            "--audio".into(),
-            s(&input.path),
-            "--segmentation".into(),
-            s(seg),
-            "--embedding".into(),
-            s(emb),
-            "--out".into(),
-            s(&out),
-        ];
-        // 0 = Auto: the worker works out how many people are talking
-        if input.num_speakers > 0 {
-            args.extend(["--num-speakers".into(), input.num_speakers.to_string()]);
-        }
-        let res = run_worker(exe, &args, &dir.join("diar-worker.log"), &mut |v| match v
-            .get("event")
-            .and_then(Value::as_str)
-        {
-            Some("audio") => emit(Event::Detail("Finding who is speaking when".into())),
-            Some("progress") => emit(Event::Progress {
-                step: pct_of(v),
-                overall: overall_progress(&steps, step, pct_of(v)),
-            }),
-            _ => {}
+            (exe.clone(), args)
         });
-        match res.and_then(|_| std::fs::read_to_string(&out).map_err(|e| e.to_string())) {
+    let diar_log = dir.join("diar-worker.log");
+
+    let (asr, turns) = std::thread::scope(|scope| -> Result<_, String> {
+        let (diar_tx, diar_rx) = mpsc::channel::<Value>();
+        let mut diar_tx = Some(diar_tx);
+        let mut diar_run: Option<std::thread::ScopedJoinHandle<Result<Value, String>>> = None;
+        // starts the speaker worker, on the shared audio once ASR has saved it, else on the recording itself
+        let mut start_diar = |diar_run: &mut Option<_>| {
+            let (Some((exe, args)), Some(tx)) = (&diar, diar_tx.take()) else {
+                return;
+            };
+            let audio = shared_audio
+                .as_ref()
+                .map(|a| a.0.clone())
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| input.path.clone());
+            let mut args = args.clone();
+            args.extend(["--audio".into(), s(&audio)]);
+            let log = &diar_log;
+            *diar_run = Some(scope.spawn(move || {
+                run_worker(exe, &args, log, &mut |v| {
+                    let _ = tx.send(v.clone());
+                })
+            }));
+        };
+
+        let asr_run = run_worker(
+            &asr_exe,
+            &args,
+            &dir.join("asr-worker.log"),
+            &mut |v| match v.get("event").and_then(Value::as_str) {
+                Some("audio") => {
+                    let secs = v.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
+                    emit(Event::Detail(format!(
+                        "Audio ready ({}). Loading the speech model",
+                        engine::transcript::clock(secs)
+                    )));
+                    start_diar(&mut diar_run);
+                }
+                Some("model_loaded") => {
+                    emit(Event::Detail("Looking for the parts with speech".into()))
+                }
+                Some("vad") => {
+                    let n = v.get("regions").and_then(Value::as_u64).unwrap_or(0);
+                    let sp = v
+                        .get("speech_seconds")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    emit(Event::Detail(format!(
+                        "Found {n} stretches of speech ({sp:.0} s). Writing down the words"
+                    )));
+                }
+                Some("progress") => emit(Event::Progress {
+                    step: pct_of(v),
+                    overall: overall_progress(&steps, step, pct_of(v)),
+                }),
+                _ => {}
+            },
+        );
+        if let Err(e) = asr_run {
+            // the run is over: stop the speaker worker too rather than wait for it
+            if diar_run.is_some() {
+                kill_running_worker();
+            }
+            return Err(friendly_error(&file_name, &e));
+        }
+        step += 1;
+        let asr = AsrResult::load(&asr_json).map_err(|e| e.to_string())?;
+
+        // 2. who speaks when (optional); usually well under way by now
+        let mut turns: Option<Vec<SpeakerTurn>> = None;
+        if diar.is_none() {
+            emit(Event::Note(
+                "Speaker detection is not available; all speech is labelled as one speaker.".into(),
+            ));
+            return Ok((asr, turns));
+        }
+        emit(Event::Step(step));
+        emit(Event::Detail("Finding who is speaking when".into()));
+        if diar_run.is_none() {
+            start_diar(&mut diar_run);
+        }
+        drop(start_diar);
+        // the sender lives in the speaker thread, so this ends when the worker does
+        for v in diar_rx {
+            if v.get("event").and_then(Value::as_str) == Some("progress") {
+                emit(Event::Progress {
+                    step: pct_of(&v),
+                    overall: overall_progress(&steps, step, pct_of(&v)),
+                });
+            }
+        }
+        let res = diar_run
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("speaker detection crashed".into()))
+            })
+            .unwrap_or_else(|| Err("speaker detection did not start".into()));
+        match res.and_then(|_| std::fs::read_to_string(&diar_out).map_err(|e| e.to_string())) {
             Ok(text) => match serde_json::from_str::<Value>(&text)
                 .ok()
                 .and_then(|v| serde_json::from_value(v["turns"].clone()).ok())
@@ -518,16 +609,16 @@ pub fn run(input: &JobInput, emit: &mut dyn FnMut(Event)) -> Result<(), String> 
                         .into(),
                 )),
             },
+            // a Cancel stops the whole run, not just this step
+            Err(e) if CANCELLED.load(Ordering::SeqCst) => return Err(e),
             Err(e) => emit(Event::Note(format!(
                 "Speaker detection failed ({e}); continuing without speakers."
             ))),
         }
         step += 1;
-    } else {
-        emit(Event::Note(
-            "Speaker detection is not available; all speech is labelled as one speaker.".into(),
-        ));
-    }
+        Ok((asr, turns))
+    })?;
+    drop(shared_audio);
 
     let mut transcript = Transcript::build(
         &input
@@ -823,9 +914,7 @@ fn run_ffmpeg(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start ffmpeg: {e}"))?;
-    if let Ok(mut g) = RUNNING_WORKER.lock() {
-        *g = Some(child.id());
-    }
+    let tracked = Tracked::new(child.id());
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(done) = line
@@ -838,9 +927,7 @@ fn run_ffmpeg(
         }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    if let Ok(mut g) = RUNNING_WORKER.lock() {
-        *g = None;
-    }
+    drop(tracked);
     if CANCELLED.load(Ordering::SeqCst) {
         return Err("Cancelled".into());
     }
@@ -945,6 +1032,15 @@ pub fn write_translated(
     write_subtitle_files(&translated_cues(file), &file.target, |ext| {
         paths.translated(&file.target, ext)
     })
+}
+
+/// A file deleted when this goes out of scope.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(test)]

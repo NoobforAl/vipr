@@ -1,6 +1,6 @@
 //! Background work on finished results: the queue of translate and compare runs, and Open result.
 //!
-//! Only one worker runs at a time (`pipeline::RUNNING_WORKER`), so `main.rs` shares the slot:
+//! Only one job runs at a time (its workers are in `pipeline::RUNNING_WORKERS`), so `main.rs` shares the slot:
 //! `App::start_next` runs waiting transcriptions first, then asks this queue, and starts nothing
 //! while [`busy`] is true. Runs use `pipeline`'s worker runner, so Cancel and closing the window stop
 //! them. A translation stopped this way resumes from its checkpoint when it is started again.

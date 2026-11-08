@@ -53,6 +53,9 @@ struct Args {
     cpu: bool,
     #[arg(long, default_value_t = 4)]
     threads: i32,
+    /// Also save the decoded mono 16 kHz audio here (float WAV), so the next worker need not decode the video again
+    #[arg(long)]
+    save_audio: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -168,6 +171,13 @@ fn run(args: &Args) -> Result<()> {
 
     let samples = engine::audio::decode_to_mono_16k(&args.audio).context("decoding audio")?;
     let audio_seconds = samples.len() as f64 / 16_000.0;
+    // saved before the "audio" event, so whoever waits for that event can start reading it; a convenience for the
+    // next step, so failing to save it is not a reason to stop
+    if let Some(p) = &args.save_audio
+        && let Err(e) = engine::audio::write_wav_f32_16k(p, &samples)
+    {
+        event(json!({"event": "note", "message": format!("could not save the audio ({e})")}));
+    }
     event(json!({"event": "audio", "seconds": audio_seconds}));
 
     let t = Instant::now();
@@ -242,6 +252,9 @@ fn run(args: &Args) -> Result<()> {
             .context("VAD model path is not valid UTF-8")?;
         let mut vctx_params = WhisperVadContextParams::new();
         vctx_params.set_use_gpu(false); // tiny model, CPU is fine
+        // The model is so small that each of its ~30 steps per second of audio is mostly thread hand-off: one thread
+        // is the fastest (18 min of audio: 21 s, against 38 s with whisper.cpp's default of 4 and 62 s with 6).
+        vctx_params.set_n_threads(1);
         let mut vctx =
             WhisperVadContext::new(vad_path, vctx_params).context("loading VAD model")?;
         let mut vparams = WhisperVadParams::new();

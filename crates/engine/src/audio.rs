@@ -705,8 +705,65 @@ pub fn write_wav_16k(path: &Path, samples: &[f32]) -> Result<()> {
     f.write_all(&out).map_err(io_err(path))
 }
 
+/// Save mono 16 kHz audio as a 32-bit float WAV, losslessly: reading it back gives exactly `samples`, so one worker
+/// can decode a recording and hand the result to the next instead of each decoding the video again. Written to a
+/// temporary name first, so a half-written file is never left under `path`.
+pub fn write_wav_f32_16k(path: &Path, samples: &[f32]) -> Result<()> {
+    use std::io::{BufWriter, Write};
+    let data_len = u32::try_from(samples.len() * 4)
+        .ok()
+        .filter(|n| *n <= u32::MAX - 36)
+        .ok_or_else(|| Error::Audio("audio too long for a WAV file".into()))?;
+    let tmp = path.with_extension("wav.part");
+    let write = || -> std::io::Result<()> {
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
+        w.write_all(b"RIFF")?;
+        w.write_all(&(36 + data_len).to_le_bytes())?;
+        w.write_all(b"WAVEfmt ")?;
+        w.write_all(&16u32.to_le_bytes())?;
+        w.write_all(&3u16.to_le_bytes())?; // IEEE float
+        w.write_all(&1u16.to_le_bytes())?; // mono
+        w.write_all(&TARGET_RATE.to_le_bytes())?;
+        w.write_all(&(TARGET_RATE * 4).to_le_bytes())?;
+        w.write_all(&4u16.to_le_bytes())?;
+        w.write_all(&32u16.to_le_bytes())?;
+        w.write_all(b"data")?;
+        w.write_all(&data_len.to_le_bytes())?;
+        for s in samples {
+            w.write_all(&s.to_le_bytes())?;
+        }
+        w.into_inner().map_err(|e| e.into_error())?.sync_all()
+    };
+    if let Err(e) = write().and_then(|_| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err(path)(e));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn float_wav_reads_back_exactly() {
+        let dir = std::env::temp_dir().join(format!("vipr-f32wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.16k.wav");
+        // values a 16-bit file would round, and a few that are out of range
+        let src: Vec<f32> = (0..20_001)
+            .map(|i| ((i as f32 * 0.013).sin() * 1.3) + 1e-7 * i as f32)
+            .collect();
+        super::write_wav_f32_16k(&p, &src).unwrap();
+        assert!(!p.with_extension("wav.part").exists());
+        let back = super::decode_to_mono_16k(&p).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(back.len(), src.len());
+        assert!(
+            back.iter()
+                .zip(&src)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+
     #[test]
     fn ffmpeg_search_honours_the_environment_variable() {
         // a path that does not exist is ignored (falls through to the other places)
