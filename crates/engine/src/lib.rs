@@ -11,6 +11,7 @@ pub mod diar;
 pub mod diff;
 pub mod download;
 pub mod fsio;
+pub mod history;
 pub mod lang;
 pub mod marks;
 pub mod profiles;
@@ -26,6 +27,7 @@ pub mod subtitles;
 pub mod tools;
 pub mod transcript;
 pub mod translate;
+pub mod workspace;
 
 /// Folder name under the per-user data / config dirs (`%LOCALAPPDATA%\ViPr`, ...).
 pub const APP_DIR_NAME: &str = "ViPr";
