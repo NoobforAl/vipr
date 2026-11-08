@@ -27,7 +27,9 @@ unicode-bidi = "0.3.18"
 unicode-segmentation = "1.13.3"
 
 [dev-dependencies]
-criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8.2", default-features = false, features = [
+  "cargo_bench_support",
+] }
 
 [[bench]]
 name = "engine"

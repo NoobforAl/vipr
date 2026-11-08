@@ -1,0 +1,75 @@
+# Lints and tests on every push to main and every pull request. No release builds here.
+#
+# The same checks run locally with `make lint` and `make test`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# a newer push to the same branch makes the older run pointless
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # warnings fail the build here, as `make lint` does
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: Format (Rust, Python, TOML)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: ruff format
+        run: uvx ruff format --check scripts validation
+
+      - name: ruff check
+        run: uvx ruff check scripts validation
+
+      - name: taplo (TOML)
+        run: uvx taplo fmt --check Cargo.toml .cargo/config.toml scripts/pyproject.toml crates/*/Cargo.toml
+
+  clippy-test:
+    name: Clippy and tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: astral-sh/setup-uv@v6
+
+      # whisper-rs / llama-cpp-2 need libclang 18 for bindgen; .cargo/config.toml points at this copy
+      - name: Build tools (libclang 18)
+        shell: pwsh
+        run: ./scripts/setup-build-tools.ps1
+
+      # the workers compile whisper.cpp and llama.cpp, which takes a while the first time
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (whole workspace, CPU workers)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
