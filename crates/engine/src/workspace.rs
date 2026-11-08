@@ -424,26 +424,53 @@ pub fn temporary_projects(root: &Path) -> Vec<(PathBuf, Workspace)> {
     found
 }
 
-/// Deletes a temporary project's folder. Refuses anything that isn't one.
-pub fn remove_temporary(project_file: &Path) -> Result<()> {
+/// Deletes a temporary project's folder. Does nothing for anything [`is_temporary`] doesn't accept, so a
+/// folder of the user's can never be deleted by mistake.
+pub fn remove_temporary(project_file: &Path, root: &Path) -> Result<()> {
+    if !is_temporary(project_file, root) {
+        return Ok(());
+    }
     let Some(dir) = project_file.parent() else {
         return Ok(());
     };
-    let is_temp = dir
-        .file_name()
-        .is_some_and(|n| n.to_string_lossy().starts_with("untitled-"));
-    if !is_temp || !dir.exists() {
-        return Ok(());
-    }
     std::fs::remove_dir_all(dir).map_err(io_err(dir))
 }
 
-/// `true` if the project file lives in a temporary project folder.
-pub fn is_temporary(project_file: &Path) -> bool {
-    project_file
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|n| n.to_string_lossy().starts_with("untitled-"))
+/// `true` only for an existing `<root>/untitled-<time>/untitled.vipr`: a project ViPr made itself, in its
+/// own folder for unsaved projects. Paths are compared after resolving links, so a folder the user named
+/// `untitled-…` anywhere else, or a link to one, never counts.
+pub fn is_temporary(project_file: &Path, root: &Path) -> bool {
+    let named = project_file
+        .file_name()
+        .is_some_and(|n| *n == *format!("untitled.{EXTENSION}"));
+    let Some(dir) = project_file.parent() else {
+        return false;
+    };
+    let in_own_folder = dir
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("untitled-"));
+    let (Ok(dir), Ok(root)) = (dir.canonicalize(), root.canonicalize()) else {
+        return false;
+    };
+    named && in_own_folder && dir.parent() == Some(root.as_path())
+}
+
+/// `true` if `path` would land inside `root`, where only ViPr's own unsaved projects belong.
+pub fn is_inside(path: &Path, root: &Path) -> bool {
+    let Ok(root) = root.canonicalize() else {
+        return false; // no such folder yet, so nothing can be inside it
+    };
+    // the file itself may not exist yet: resolve the nearest folder that does
+    let mut at = path;
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            return real.starts_with(&root);
+        }
+        match at.parent() {
+            Some(parent) => at = parent,
+            None => return false,
+        }
+    }
 }
 
 fn move_item<T>(items: &mut Vec<T>, is: impl Fn(&T) -> bool, by: isize) -> bool {
@@ -691,19 +718,45 @@ mod tests {
         let mut w = Workspace::new("");
         w.add_clip(Path::new("/a.mp4"), 1);
         w.save(&used).unwrap();
-        assert!(is_temporary(&used) && !is_temporary(&dir.0.join("p.vipr")));
+        assert!(is_temporary(&used, &dir.0) && !is_temporary(&dir.0.join("p.vipr"), &dir.0));
 
         let found = temporary_projects(&dir.0);
         assert_eq!(found.len(), 1, "an empty one is not worth restoring");
         assert_eq!(found[0].0, used);
 
-        remove_temporary(&used).unwrap();
+        remove_temporary(&used, &dir.0).unwrap();
         assert!(!used.parent().unwrap().exists());
         // never deletes a folder that isn't a temporary project
         let keep = dir.0.join("mine/p.vipr");
         touch(&keep);
-        remove_temporary(&keep).unwrap();
+        remove_temporary(&keep, &dir.0).unwrap();
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn a_users_folder_named_like_an_unsaved_project_is_never_deleted() {
+        let dir = TestDir::new("lookalike");
+        let root = dir.0.join("unsaved");
+        std::fs::create_dir_all(&root).unwrap();
+        // the user's own folder elsewhere, named and laid out exactly like one of ViPr's
+        let theirs = dir.0.join("Documents/untitled-trip/untitled.vipr");
+        touch(&theirs);
+        touch(&dir.0.join("Documents/untitled-trip/holiday.mp4"));
+        assert!(!is_temporary(&theirs, &root));
+        remove_temporary(&theirs, &root).unwrap();
+        assert!(theirs.exists() && dir.0.join("Documents/untitled-trip/holiday.mp4").exists());
+        // and a missing root holds nothing
+        assert!(!is_temporary(&theirs, &dir.0.join("nowhere")));
+
+        assert!(
+            is_inside(&root.join("untitled-1/new.vipr"), &root),
+            "not there yet, still inside"
+        );
+        assert!(!is_inside(&dir.0.join("Documents/p.vipr"), &root));
+        assert!(
+            !is_inside(&dir.0.join("unsaved-other/p.vipr"), &root),
+            "a name that only starts the same"
+        );
     }
 
     #[test]

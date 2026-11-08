@@ -37,13 +37,16 @@ pub struct Open {
     pub data: Workspace,
     /// Changed since the user last saved it (named projects only; unsaved ones save themselves).
     pub dirty: bool,
+    /// ViPr made it in its own folder for unsaved projects (`workspace::is_temporary`). Only such a
+    /// project's folder is ever deleted.
+    temporary: bool,
     log: HistoryLog,
     last_backup: Option<Instant>,
 }
 
 impl Open {
     pub fn temporary(&self) -> bool {
-        workspace::is_temporary(&self.path)
+        self.temporary
     }
 
     /// For the title bar: the project's name, `•` while it has unsaved changes.
@@ -241,7 +244,7 @@ impl App {
         let root = self.workspace.root();
         let found = workspace::temporary_projects(&root);
         for (old, _) in found.iter().skip(KEEP_UNSAVED) {
-            let _ = workspace::remove_temporary(old);
+            let _ = workspace::remove_temporary(old, &root);
         }
         // folders of projects that never got a clip
         if let Ok(read) = std::fs::read_dir(&root) {
@@ -249,7 +252,7 @@ impl App {
             for e in read.flatten() {
                 let file = e.path().join(format!("untitled.{}", workspace::EXTENSION));
                 if !kept.contains(file.as_path()) {
-                    let _ = workspace::remove_temporary(&file);
+                    let _ = workspace::remove_temporary(&file, &root);
                 }
             }
         }
@@ -265,6 +268,7 @@ impl App {
                 path,
                 data: Workspace::new(""),
                 dirty: false,
+                temporary: true,
                 log,
                 last_backup: None,
             });
@@ -405,7 +409,7 @@ impl App {
                 Some(Task::none())
             }
             Some(open) if open.temporary() && open.data.clips.is_empty() => {
-                let _ = workspace::remove_temporary(&open.path);
+                let _ = workspace::remove_temporary(&open.path, &self.workspace.root());
                 None
             }
             _ => None,
@@ -518,11 +522,12 @@ impl App {
     /// Leaves the current project: an unsaved one without clips is deleted, one with clips stays to
     /// be restored later.
     fn ws_leave(&mut self) {
+        let root = self.workspace.root();
         if let Some(open) = self.workspace.open.take()
             && open.temporary()
             && open.data.clips.is_empty()
         {
-            let _ = workspace::remove_temporary(&open.path);
+            let _ = workspace::remove_temporary(&open.path, &root);
         }
         self.workspace.undo.clear();
         self.workspace.history.clear();
@@ -572,6 +577,12 @@ impl App {
     }
 
     fn ws_save_to(&mut self, path: PathBuf) -> Result<(), String> {
+        let root = self.workspace.root();
+        if workspace::is_inside(&path, &root) {
+            return Err(
+                "that folder is where ViPr keeps unsaved projects. Choose another place.".into(),
+            );
+        }
         let Some(open) = self.workspace.open.as_mut() else {
             return Ok(());
         };
@@ -586,8 +597,9 @@ impl App {
         if path != old {
             let _ = open.log.move_to(&workspace::history_path(&path));
             open.path = path.clone();
+            open.temporary = false;
             if was_temporary {
-                let _ = workspace::remove_temporary(&old);
+                let _ = workspace::remove_temporary(&old, &root);
             }
         }
         open.dirty = false;
@@ -628,13 +640,14 @@ impl App {
             }
             Msg::Loaded(Ok((path, data))) => {
                 self.ws_leave();
-                let temporary = workspace::is_temporary(&path);
+                let temporary = workspace::is_temporary(&path, &self.workspace.root());
                 let log = HistoryLog::new(workspace::history_path(&path));
                 self.workspace.history = log.tail(HISTORY_SHOWN);
                 self.workspace.open = Some(Open {
                     path: path.clone(),
                     data,
                     dirty: false,
+                    temporary,
                     log,
                     last_backup: None,
                 });
@@ -708,7 +721,7 @@ impl App {
             },
             Msg::Discard => {
                 if let Some((path, _)) = self.workspace.restorable.take() {
-                    let _ = workspace::remove_temporary(&path);
+                    let _ = workspace::remove_temporary(&path, &self.workspace.root());
                 }
                 Task::none()
             }
@@ -1193,6 +1206,39 @@ mod tests {
     }
 
     #[test]
+    fn a_users_project_in_a_folder_named_untitled_is_never_deleted() {
+        let dir = TestDir::new("lookalike");
+        let theirs = dir.0.join("untitled-trip").join("untitled.vipr");
+        Workspace::new("").save(&theirs).unwrap(); // no clips, like an empty unsaved project
+        let mut app = app_in(&dir);
+        let _ = app.ws_update(Msg::Loaded(Ok((
+            theirs.clone(),
+            Workspace::load(&theirs).unwrap(),
+        ))));
+        assert!(!app.workspace.open.as_ref().unwrap().temporary());
+        let _ = app.ws_update(Msg::New); // leaves the project
+        assert!(app.ws_before_close().is_none());
+        assert!(theirs.exists(), "the user's folder is still there");
+
+        // and Save As can't put a project where ViPr keeps its unsaved ones
+        app.jobs.push(Job::new(1, dir.0.join("a.mp4"), 1));
+        app.ws_jobs_added(&[1]);
+        saver::wait();
+        let temp_dir = app
+            .workspace
+            .open
+            .as_ref()
+            .unwrap()
+            .path
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let err = app.ws_save_to(temp_dir.join("Mine.vipr")).unwrap_err();
+        assert!(err.contains("unsaved projects"), "{err}");
+        assert!(app.workspace.open.as_ref().unwrap().temporary());
+    }
+
+    #[test]
     fn a_missing_recording_is_shown_as_missing_and_can_be_found_again() {
         let dir = TestDir::new("missing");
         let file = dir.0.join("p.vipr");
@@ -1247,17 +1293,18 @@ mod tests {
 
     #[test]
     fn a_named_project_shows_unsaved_changes_in_its_title() {
-        let open = |path: &str, dirty| Open {
+        let open = |path: &str, dirty, temporary| Open {
             path: PathBuf::from(path),
             data: Workspace::new(""),
             dirty,
+            temporary,
             log: HistoryLog::new("x"),
             last_backup: None,
         };
-        assert_eq!(open("C:/p/Meeting.vipr", true).title(), "Meeting •");
-        assert_eq!(open("C:/p/Meeting.vipr", false).title(), "Meeting");
+        assert_eq!(open("C:/p/Meeting.vipr", true, false).title(), "Meeting •");
+        assert_eq!(open("C:/p/Meeting.vipr", false, false).title(), "Meeting");
         assert_eq!(
-            open("C:/u/untitled-1/untitled.vipr", false).title(),
+            open("C:/u/untitled-1/untitled.vipr", false, true).title(),
             "Unsaved project"
         );
     }
