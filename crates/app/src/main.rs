@@ -926,6 +926,11 @@ impl App {
         {
             return Task::none();
         }
+        if matches!(self.page, Page::Player(_))
+            && let Some(msg) = player::undo_key(&self.player, &key, mods)
+        {
+            return self.update(Message::Player(msg));
+        }
         if let Some(message) = self.ws_key(&key, mods, self.page == Page::Home) {
             return self.update(message);
         }

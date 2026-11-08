@@ -253,6 +253,15 @@ fn metrics_text(e: &Entry) -> String {
             }
             parts.join(", ")
         }
+        Kind::CutsChanged => match (m("cuts"), m("cut_seconds")) {
+            (Some(0.0), _) => "no cuts".to_string(),
+            (Some(n), Some(left_out)) => format!(
+                "{n:.0} cut{}, {} left out",
+                if n == 1.0 { "" } else { "s" },
+                crate::mmss(left_out as u64)
+            ),
+            _ => String::new(),
+        },
         _ => String::new(),
     }
 }
@@ -1625,6 +1634,10 @@ mod tests {
             .metric("elapsed_seconds", 57.0);
         assert_eq!(metrics_text(&e), "18:02 of sound in 0:57, 19× real time");
         assert_eq!(metrics_text(&Entry::new(Kind::Saved, "")), "");
+        let cuts = Entry::new(Kind::CutsChanged, "Cut")
+            .metric("cuts", 2.0)
+            .metric("cut_seconds", 65.0);
+        assert_eq!(metrics_text(&cuts), "2 cuts, 1:05 left out");
     }
 
     #[test]

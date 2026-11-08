@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering::Acquire;
 use std::time::{Duration, Instant};
 
 use engine::cuts::{self, Cut, CutsFile};
+use engine::history::{Entry, Kind as Change, Undo};
 use engine::marks::{Mark, MarkKind};
 use engine::project::Chapter;
 use iced::futures::channel::{mpsc, oneshot};
@@ -101,6 +102,8 @@ pub struct State {
     cut_in: Option<f64>,
     /// The cuts file couldn't be read, so cuts can't be changed: saving would replace it.
     cuts_locked: bool,
+    /// Earlier cuts of this recording, for Undo (Ctrl+Z) and Redo (Ctrl+Y). Cleared on opening another.
+    cut_undo: Undo<Vec<Cut>>,
     /// In time order. Each lasts until the next one.
     chapters: Vec<Chapter>,
     chapters_stale: bool,
@@ -166,6 +169,7 @@ impl Default for State {
             cuts: Vec::new(),
             cut_in: None,
             cuts_locked: false,
+            cut_undo: Undo::default(),
         }
     }
 }
@@ -208,6 +212,9 @@ pub enum Msg {
     /// Forget the cut being made.
     CutCancel,
     RemoveCut(usize),
+    /// Take the last change to the cuts back, or make it again.
+    UndoCut,
+    RedoCut,
     /// Save the video with the subtitles on show, leaving out the cuts.
     ExportVideo,
     /// Ask the AI where the topic changes.
@@ -581,20 +588,41 @@ fn handle(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
         Msg::CutEnd => {
             if let Some(from) = state.cut_in.take() {
                 let to = state.position;
+                let before = state.cuts.clone();
                 state.cuts.push(Cut {
                     start: from.min(to),
                     end: from.max(to),
                 });
                 state.cuts = cuts::normalize(&state.cuts, state.duration);
-                save_cuts(state);
+                return (task, cuts_changed(state, "Cut", Some(before)));
             }
         }
         Msg::CutCancel => state.cut_in = None,
         Msg::RemoveCut(i) if i < state.cuts.len() && !state.cuts_locked => {
+            let before = state.cuts.clone();
             state.cuts.remove(i);
-            save_cuts(state);
+            return (task, cuts_changed(state, "Take a cut back", Some(before)));
         }
         Msg::CutStart | Msg::RemoveCut(_) => {}
+        Msg::UndoCut | Msg::RedoCut if !state.cuts_locked => {
+            let current = state.cuts.clone();
+            let step = if matches!(msg, Msg::UndoCut) {
+                state.cut_undo.undo(current)
+            } else {
+                state.cut_undo.redo(current)
+            };
+            if let Some((what, cuts)) = step {
+                state.cut_in = None;
+                state.cuts = cuts;
+                let what = if matches!(msg, Msg::UndoCut) {
+                    format!("Undo: {what}")
+                } else {
+                    format!("Redo: {what}")
+                };
+                return (task, cuts_changed(state, &what, None));
+            }
+        }
+        Msg::UndoCut | Msg::RedoCut => {}
         Msg::ExportVideo => {
             if let Some(job) = &state.job {
                 let lang = state.tracks.get(state.active).and_then(|t| t.code.clone());
@@ -625,6 +653,19 @@ fn set_tracks(state: &mut State, tracks: Vec<Track>) {
     state.tracks = tracks;
 }
 
+/// After the cuts changed: remembers `before` for Undo, saves them, and tells the project's change log.
+fn cuts_changed(state: &mut State, what: &str, before: Option<Vec<Cut>>) -> Out {
+    if let Some(before) = before {
+        state.cut_undo.record(what, before);
+    }
+    save_cuts(state);
+    let left_out = cuts::removed(&state.cuts);
+    let entry = Entry::new(Change::CutsChanged, what)
+        .metric("cuts", state.cuts.len() as f64)
+        .metric("cut_seconds", left_out);
+    Out::Record(state.job.as_ref().map(|j| j.id), entry)
+}
+
 /// Writes the cuts on the save thread, so a slow disk can't freeze the window.
 fn save_cuts(state: &State) {
     if let Some(job) = &state.job {
@@ -642,6 +683,7 @@ fn on_loaded(state: &mut State, loaded: Option<Arc<Loaded>>) -> Task<Msg> {
         return Task::none();
     };
     state.cut_in = None;
+    state.cut_undo.clear();
     match &loaded.cuts {
         Ok(cuts) => {
             state.cuts = cuts.clone();
@@ -836,7 +878,8 @@ fn cut_layout(cuts: &[Cut], cut_in: Option<f64>, duration: f64) -> (Vec<(u16, u1
 
 /// The cuts as a row of chips: click one to go there, the cross to take it back. Nothing without cuts.
 fn cut_list<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
-    if state.cuts.is_empty() && state.cut_in.is_none() {
+    let (undo, redo) = (state.cut_undo.next_undo(), state.cut_undo.next_redo());
+    if state.cuts.is_empty() && state.cut_in.is_none() && undo.is_none() && redo.is_none() {
         return None;
     }
     let chip = |text: String, go: f64, remove: Msg| -> Element<'a, Msg> {
@@ -884,6 +927,24 @@ fn cut_list<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
             .into(),
         );
     }
+    for (name, msg, enabled) in [
+        ("Undo", Msg::UndoCut, undo.is_some()),
+        ("Redo", Msg::RedoCut, redo.is_some()),
+    ] {
+        if undo.is_some() || redo.is_some() {
+            items.push(
+                button(
+                    label(name)
+                        .size(11)
+                        .color(if enabled { t.muted } else { t.faint }),
+                )
+                .padding([2, 6])
+                .style(theme::ghost(t))
+                .on_press_maybe(enabled.then_some(msg))
+                .into(),
+            );
+        }
+    }
     Some(
         row(items)
             .spacing(6)
@@ -892,6 +953,21 @@ fn cut_list<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
             .vertical_spacing(4)
             .into(),
     )
+}
+
+/// Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) for the cuts, while the player is open.
+pub fn undo_key(state: &State, key: &Key, mods: Modifiers) -> Option<Msg> {
+    if !mods.command() || state.cuts_locked || state.job.is_none() {
+        return None;
+    }
+    let Key::Character(c) = key.as_ref() else {
+        return None;
+    };
+    match (c.to_lowercase().as_str(), mods.shift()) {
+        ("z", false) => state.cut_undo.next_undo().map(|_| Msg::UndoCut),
+        ("z", true) | ("y", _) => state.cut_undo.next_redo().map(|_| Msg::RedoCut),
+        _ => None,
+    }
 }
 
 /// The share of the strip each chapter gets. Even a tiny chapter stays something to click.
@@ -1434,6 +1510,61 @@ pub fn position(state: &State) -> Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuts_can_be_undone_and_redone_and_every_change_is_saved_and_logged() {
+        let dir = std::env::temp_dir().join(format!("vipr-player-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = engine::project::ProjectPaths::new(dir.clone(), "a".to_string());
+        let mut state = State {
+            job: Some(JobRef {
+                id: 7,
+                media: dir.join("a.mp4"),
+                paths: paths.clone(),
+            }),
+            duration: 60.0,
+            ..State::default()
+        };
+        let saved = |state: &State| {
+            crate::saver::wait();
+            let file: CutsFile = engine::fsio::load_json(&paths.cuts()).unwrap();
+            assert_eq!(file.cuts, state.cuts, "the file follows every change");
+            file.cuts.len()
+        };
+
+        state.position = 10.0;
+        let _ = update(&mut state, Msg::CutStart);
+        state.position = 15.0;
+        let (_, out) = update(&mut state, Msg::CutEnd);
+        assert!(
+            matches!(&out, Out::Record(Some(7), e) if e.kind == Change::CutsChanged),
+            "{out:?}"
+        );
+        assert_eq!(saved(&state), 1);
+
+        let _ = update(&mut state, Msg::RemoveCut(0));
+        assert_eq!(saved(&state), 0);
+        let ctrl_z = undo_key(&state, &Key::Character("z".into()), Modifiers::CTRL);
+        assert!(matches!(ctrl_z, Some(Msg::UndoCut)));
+        let _ = update(&mut state, Msg::UndoCut);
+        assert_eq!(saved(&state), 1, "the cut is back");
+        assert_eq!(
+            state.cuts[0],
+            Cut {
+                start: 10.0,
+                end: 15.0
+            }
+        );
+        let _ = update(&mut state, Msg::UndoCut);
+        assert_eq!(saved(&state), 0, "and before it was made");
+        assert!(undo_key(&state, &Key::Character("z".into()), Modifiers::CTRL).is_none());
+        let _ = update(&mut state, Msg::RedoCut);
+        assert_eq!(saved(&state), 1);
+        let ctrl_y = undo_key(&state, &Key::Character("y".into()), Modifiers::CTRL);
+        assert!(matches!(ctrl_y, Some(Msg::RedoCut)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn chapter(start: f64) -> Chapter {
         Chapter {
