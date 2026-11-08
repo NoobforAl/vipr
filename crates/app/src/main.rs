@@ -19,6 +19,7 @@ mod progress;
 mod review_ui;
 mod saver;
 mod theme;
+mod workspace_ui;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -261,6 +262,8 @@ struct Job {
     error: Option<String>,
     /// Opened from saved results and its media is not where it was.
     media_missing: bool,
+    /// Its clip in the open project (`workspace_ui`).
+    clip: Option<u64>,
 }
 
 impl Job {
@@ -290,6 +293,7 @@ impl Job {
             paths: None,
             error: None,
             media_missing: false,
+            clip: None,
         }
     }
 
@@ -474,6 +478,7 @@ enum Message {
     Export(export_ui::Msg),
     Review(review_ui::Msg),
     Jobs(jobs::Msg),
+    Workspace(workspace_ui::Msg),
 }
 
 // ------------------------------------------------------------------ app state
@@ -540,6 +545,7 @@ struct App {
     export: export_ui::State,
     review: review_ui::State,
     queue: jobs::State,
+    workspace: workspace_ui::State,
 }
 
 impl App {
@@ -613,8 +619,10 @@ impl App {
             export: export_ui::State::default(),
             review: review_ui::State::default(),
             queue: jobs::State::default(),
+            workspace: workspace_ui::State::default(),
         };
         app.recompute_tokens();
+        app.ws_init();
         engine::audio::set_ffmpeg_override(app.settings.ffmpeg_path.clone());
         app.ffmpeg = engine::audio::find_ffmpeg();
         // dev helper: MT_PRELOAD="a.mp4;b.mp4" queues files at start-up
@@ -904,8 +912,12 @@ impl App {
         if self.settings_open
             || import_ui::is_open(&self.import)
             || export_ui::is_open(&self.export)
+            || self.workspace.is_asking()
         {
             return Task::none();
+        }
+        if let Some(message) = self.ws_key(&key, mods, self.page == Page::Home) {
+            return self.update(message);
         }
         let message = match self.page {
             Page::Player(_) if player::is_playing(&self.player) => {
@@ -1185,6 +1197,9 @@ impl App {
                 None => Task::none(),
             },
             Message::CloseWindow => {
+                if let Some(wait) = self.ws_before_close() {
+                    return wait; // the user is asked about unsaved project changes first
+                }
                 // do not leave a worker running (and the GPU busy) after the window is gone
                 pipeline::request_cancel();
                 player::close(&mut self.player);
@@ -1225,7 +1240,9 @@ impl App {
                 Task::none()
             }
             Message::Escape => {
-                if export_ui::is_open(&self.export) {
+                if self.workspace.is_asking() {
+                    self.update(Message::Workspace(workspace_ui::Msg::AnswerCancel))
+                } else if export_ui::is_open(&self.export) {
                     self.update(Message::Export(export_ui::Msg::Close))
                 } else if import_ui::is_open(&self.import) {
                     self.update(Message::Import(import_ui::Msg::Close))
@@ -1257,6 +1274,7 @@ impl App {
             }
             Message::FilesChecked(results) => {
                 let mut skipped: Vec<String> = Vec::new();
+                let mut added: Vec<u64> = Vec::new();
                 for (f, verdict) in results {
                     let name = match file_name(&f) {
                         name if name.is_empty() => clean_separators(&f.display().to_string()),
@@ -1271,6 +1289,7 @@ impl App {
                             let id = self.next_id;
                             self.next_id += 1;
                             self.jobs.push(Job::new(id, f, size));
+                            added.push(id);
                         }
                         engine::audio::Probe::NeedsFfmpeg => {
                             skipped.push(format!("{name}: this format needs ffmpeg"));
@@ -1283,6 +1302,7 @@ impl App {
                         }
                     }
                 }
+                self.ws_jobs_added(&added);
                 if !skipped.is_empty() {
                     let mut lines = self.notice.take().map(|(l, _)| l).unwrap_or_default();
                     lines.extend(skipped);
@@ -1362,7 +1382,10 @@ impl App {
             }
             Message::Remove(id) => {
                 if self.running != Some(id) {
-                    self.jobs.retain(|j| j.id != id);
+                    if let Some(at) = self.jobs.iter().position(|j| j.id == id) {
+                        let job = self.jobs.remove(at);
+                        self.ws_job_removed(&job);
+                    }
                     if matches!(
                         self.page,
                         Page::Transcript(p) | Page::Player(p) | Page::Review(p) if p == id
@@ -1449,6 +1472,7 @@ impl App {
                             j.outputs = outputs;
                             j.paths = Some(paths);
                         }
+                        self.ws_job_done(id);
                         self.running = None;
                         let next = self.start_next();
                         // only when nothing else is left to do and the user stayed where they were
@@ -1590,6 +1614,9 @@ impl App {
             }
             Message::ResultLoaded(Ok(loaded)) => {
                 let id = self.add_loaded_result(loaded);
+                if self.job(id).is_some_and(|j| j.clip.is_none()) {
+                    self.ws_jobs_added(&[id]);
+                }
                 self.open_page(Page::Transcript(id))
             }
             Message::LocateMedia(id) => {
@@ -1600,17 +1627,23 @@ impl App {
             }
             Message::MediaLocated(_, None) => Task::none(),
             Message::MediaLocated(id, Some(path)) => {
-                let Some(paths) = self.job(id).and_then(|j| j.paths.clone()) else {
-                    return Task::none();
-                };
-                if let Err(e) = jobs::locate_media(&paths, &path) {
+                // a recording with results remembers its media in its result folder too
+                if let Some(paths) = self.job(id).and_then(|j| j.paths.clone())
+                    && let Err(e) = jobs::locate_media(&paths, &path)
+                {
                     self.alert(&format!(
                         "The new place of the media could not be saved: {e}"
                     ));
                 }
+                self.ws_relinked(id, &path);
                 if let Some(j) = self.job_mut(id) {
                     j.size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     j.path = path;
+                    // one that was never transcribed can now be
+                    if j.media_missing && j.paths.is_none() {
+                        j.state = JobState::Waiting;
+                        j.error = None;
+                    }
                     j.media_missing = false;
                 }
                 Task::none()
@@ -1790,6 +1823,7 @@ impl App {
             }
 
             Message::Key(key, mods) => self.route_key(key, mods),
+            Message::Workspace(msg) => self.ws_update(msg),
             Message::Frame(at) => {
                 if self
                     .page_fade
@@ -2134,6 +2168,15 @@ impl App {
                 .on_press(Message::Export(export_ui::Msg::Close)),
             ));
         }
+        if let Some(question) = self.ws_question(t) {
+            layers.push(opaque(
+                container(center(opaque(question)))
+                    .padding(24)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(theme::scrim()),
+            ));
+        }
         // invisible handles on the window edges so the borderless window can still be resized
         if !MAC && !self.maximized && !self.fullscreen {
             layers.push(resize_edges());
@@ -2184,7 +2227,14 @@ impl App {
                         svg(svg::Handle::from_memory(APP_ICON_SVG))
                             .width(Length::Fixed(18.0))
                             .height(Length::Fixed(18.0)),
-                        text(APP_NAME).size(13).font(semibold()).color(t.muted),
+                        text(match self.ws_title() {
+                            Some(project) =>
+                                format!("{APP_NAME}  ·  {}", clean_separators(&project)),
+                            None => APP_NAME.to_string(),
+                        })
+                        .size(13)
+                        .font(semibold())
+                        .color(t.muted),
                     ]
                     .spacing(9)
                     .align_y(Alignment::Center),
@@ -2394,6 +2444,7 @@ impl App {
 
         let mut page = column![
             header,
+            self.ws_bar(t),
             open_saved,
             jobs::view(&self.queue, t, self.epoch.elapsed().as_secs_f32()).map(Message::Jobs)
         ]
@@ -2612,6 +2663,9 @@ impl App {
                 .on_press(Message::ToggleDetails(id)),
             );
         }
+        if let Some(arrows) = self.ws_move_buttons(id, t) {
+            head = head.push(arrows);
+        }
         if self.running != Some(id) {
             head = head.push(
                 button(icons::icon(icons::X, 15.0, t.muted))
@@ -2630,6 +2684,14 @@ impl App {
             JobState::Failed => {
                 if let Some(e) = &j.error {
                     body = body.push(text(clean_separators(e)).size(13).color(t.bad));
+                }
+                if j.media_missing {
+                    body = body.push(
+                        button(text("Find the recording...").size(13))
+                            .padding([7, 12])
+                            .style(theme::outline_btn(t))
+                            .on_press(Message::LocateMedia(id)),
+                    );
                 }
             }
             JobState::Done => {
