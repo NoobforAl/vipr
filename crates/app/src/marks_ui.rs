@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use engine::diff::DiffKind;
+use engine::history::{Entry, Kind as Change, Undo};
 use engine::lang::clean_separators;
 use engine::marks::{Mark, MarkKind, MarkStore};
 use iced::futures::channel::oneshot;
@@ -102,6 +103,10 @@ pub struct State {
     unlit: Option<(usize, Instant)>,
     /// The lines also show what the AI cleanup changed.
     show_changes: bool,
+    /// Earlier marks of this recording, for Undo and Redo. Cleared when another one opens.
+    undo: Undo<Vec<Mark>>,
+    /// A change made by the last message, for the project's change log.
+    changed: Option<Entry>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +134,9 @@ pub enum Msg {
     FollowAgain,
     /// Show or hide what the AI cleanup changed.
     ToggleChanges,
+    /// Take the last change to the marks back, or make it again.
+    Undo,
+    Redo,
 }
 
 /// The player page is opening on `job`: load its marks. A note still open is saved first.
@@ -137,6 +145,7 @@ pub fn open(state: &mut State, job: &JobRef) -> (Task<Msg>, Out) {
     // a save still on its way has to land before the file is read back
     saver::wait();
     state.job = Some(job.id);
+    state.undo.clear();
     state.removing = None;
     state.problem = None;
     state.offset = 0.0;
@@ -160,6 +169,10 @@ pub fn open(state: &mut State, job: &JobRef) -> (Task<Msg>, Out) {
 
 pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
     let (task, out) = handle(state, msg);
+    let out = match (out, state.changed.take()) {
+        (Out::None, Some(entry)) => Out::Record(state.job, entry),
+        (out, _) => out,
+    };
     let Some(saving) = state.saving.take() else {
         return (task, out);
     };
@@ -235,6 +248,7 @@ fn handle(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
             state.followed = None;
             state.glide = None;
         }
+        Msg::Undo | Msg::Redo => step(state, matches!(msg, Msg::Redo)),
     }
     (Task::none(), Out::None)
 }
@@ -273,10 +287,47 @@ fn find_flag(marks: &[Mark], cue: u64) -> Option<u64> {
         .map(|m| m.id)
 }
 
+/// After a change to the marks: remembers `before` for Undo, and the change for the project's log.
+fn remember(state: &mut State, what: &str, before: Vec<Mark>) {
+    state.undo.record(what, before);
+    note_change(state, what);
+}
+
+fn note_change(state: &mut State, what: &str) {
+    let count = marks(state).len();
+    state.changed = Some(Entry::new(Change::MarksChanged, what).metric("marks", count as f64));
+}
+
+/// Undo (or Redo with `redo`) one change to the marks, and save.
+fn step(state: &mut State, redo: bool) {
+    let Some(store) = &mut state.store else {
+        return;
+    };
+    let current = store.marks.clone();
+    let taken = if redo {
+        state.undo.redo(current)
+    } else {
+        state.undo.undo(current)
+    };
+    let Some((what, marks)) = taken else {
+        return;
+    };
+    // ids are never given out twice, so marks that come back keep theirs and new ones still get fresh ones
+    store.marks = marks;
+    state.editing = None;
+    state.removing = None;
+    save(state);
+    note_change(
+        state,
+        &format!("{}: {what}", if redo { "Redo" } else { "Undo" }),
+    );
+}
+
 fn add(state: &mut State, kind: MarkKind, at: Position) {
     let Some(store) = &mut state.store else {
         return;
     };
+    let before = store.marks.clone();
     // F twice on one line is one flag, however long the line stays on screen.
     let flagged =
         kind == MarkKind::Flag && at.cue.is_some_and(|c| find_flag(&store.marks, c).is_some());
@@ -284,6 +335,11 @@ fn add(state: &mut State, kind: MarkKind, at: Position) {
         let cue = if kind == MarkKind::Flag { at.cue } else { None };
         store.add(kind, at.time, String::new(), cue);
         save(state);
+        let what = match kind {
+            MarkKind::Bookmark => "Bookmark",
+            MarkKind::Flag => "Flag a line",
+        };
+        remember(state, what, before);
     }
 }
 
@@ -304,8 +360,10 @@ fn remove(state: &mut State, id: u64) {
     if state.editing.as_ref().is_some_and(|(open, _)| *open == id) {
         state.editing = None;
     }
+    let before = marks(state).to_vec();
     if state.store.as_mut().is_some_and(|store| store.remove(id)) {
         save(state);
+        remember(state, "Remove a mark", before);
     }
 }
 
@@ -338,12 +396,14 @@ pub fn flush(state: &mut State) {
         return;
     };
     let note = draft.trim().to_string();
+    let before = marks(state).to_vec();
     if state
         .store
         .as_mut()
         .is_some_and(|store| store.set_note(id, note))
     {
         save(state);
+        remember(state, "Write a note", before);
     }
 }
 
@@ -592,6 +652,24 @@ pub fn view<'a>(
             .style(theme::flat(t, true))
             .on_press(Msg::FollowAgain),
         );
+    }
+    let (undo, redo) = (state.undo.next_undo(), state.undo.next_redo());
+    if undo.is_some() || redo.is_some() {
+        for (name, msg, enabled) in [
+            ("Undo", Msg::Undo, undo.is_some()),
+            ("Redo", Msg::Redo, redo.is_some()),
+        ] {
+            title = title.push(
+                button(
+                    text(name)
+                        .size(12)
+                        .color(if enabled { t.muted } else { t.faint }),
+                )
+                .padding([4, 8])
+                .style(theme::flat(t, false))
+                .on_press_maybe(enabled.then_some(msg)),
+            );
+        }
     }
     let mut head = column![title].spacing(4);
     for problem in [state.problem.clone(), lock_problem(state).clone()]
@@ -900,6 +978,15 @@ pub fn key(state: &State, key: &Key, mods: Modifiers, at: Position) -> Option<Ms
     }
 }
 
+/// When the change Undo would take back was made, and when the one Redo would make again was (see
+/// `engine::history::Undo::undo_order`), so the player's Ctrl+Z picks between marks and cuts.
+pub fn undo_orders(state: &State) -> (Option<u64>, Option<u64>) {
+    if state.store.is_none() {
+        return (None, None);
+    }
+    (state.undo.undo_order(), state.undo.redo_order())
+}
+
 /// For the seek bar's ticks.
 pub fn marks(state: &State) -> &[Mark] {
     state.store.as_ref().map_or(&[], |store| &store.marks)
@@ -987,6 +1074,52 @@ mod tests {
 
     fn at(time: f64, cue: Option<u64>) -> Position {
         Position { time, cue }
+    }
+
+    #[test]
+    fn mark_changes_undo_and_redo_and_the_file_follows() {
+        let dir = TestDir::new("undo");
+        let mut state = opened(&dir);
+        let on_disk = || opened(&dir).store.unwrap().marks;
+        let out = send(&mut state, Msg::Add(MarkKind::Bookmark, at(9.0, None)));
+        assert!(
+            matches!(&out, Out::Record(Some(7), e) if e.kind == Change::MarksChanged),
+            "{out:?}"
+        );
+        send(&mut state, Msg::Add(MarkKind::Flag, at(2.0, Some(1))));
+        let flag = marks(&state)[0].id;
+        send(&mut state, Msg::EditNote(flag));
+        send(&mut state, Msg::NoteChanged("check this".into()));
+        send(&mut state, Msg::SaveNote);
+        send(&mut state, Msg::AskRemove(flag)); // it has a note, so this only asks
+        send(&mut state, Msg::Remove(flag));
+        assert_eq!(on_disk().len(), 1);
+
+        send(&mut state, Msg::Undo);
+        assert_eq!(on_disk().len(), 2, "the flag is back");
+        assert_eq!(on_disk()[0].note, "check this", "with its note");
+        send(&mut state, Msg::Undo);
+        assert_eq!(on_disk()[0].note, "", "the note is taken back");
+        send(&mut state, Msg::Redo);
+        assert_eq!(on_disk()[0].note, "check this");
+
+        // a mark added after undoing never reuses an id, and clears redo
+        send(&mut state, Msg::Undo);
+        send(&mut state, Msg::Undo);
+        send(&mut state, Msg::Add(MarkKind::Bookmark, at(30.0, None)));
+        let ids: Vec<u64> = on_disk().iter().map(|m| m.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(!ids.contains(&flag), "{ids:?}");
+        assert_eq!(
+            undo_orders(&state).1,
+            None,
+            "nothing to redo after a new change"
+        );
+
+        // another recording starts with nothing to undo
+        let mut other = state;
+        let _ = open(&mut other, &dir.job());
+        assert_eq!(undo_orders(&other), (None, None));
     }
 
     #[test]

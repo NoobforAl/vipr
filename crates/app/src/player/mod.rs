@@ -955,19 +955,48 @@ fn cut_list<'a>(state: &'a State, t: Tokens) -> Option<Element<'a, Msg>> {
     )
 }
 
-/// Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) for the cuts, while the player is open.
-pub fn undo_key(state: &State, key: &Key, mods: Modifiers) -> Option<Msg> {
-    if !mods.command() || state.cuts_locked || state.job.is_none() {
+/// A player with `job` open and the playhead at `position`, for tests of other modules.
+#[cfg(test)]
+pub(crate) fn for_test(job: JobRef, duration: f64, position: f64) -> State {
+    State {
+        job: Some(job),
+        duration,
+        position,
+        ..State::default()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn seek_for_test(state: &mut State, position: f64) {
+    state.position = position;
+}
+
+#[cfg(test)]
+pub(crate) fn cut_count(state: &State) -> usize {
+    state.cuts.len()
+}
+
+/// Which way Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) asks to go: `Some(false)` undo, `Some(true)` redo.
+pub fn undo_direction(key: &Key, mods: Modifiers) -> Option<bool> {
+    if !mods.command() {
         return None;
     }
     let Key::Character(c) = key.as_ref() else {
         return None;
     };
     match (c.to_lowercase().as_str(), mods.shift()) {
-        ("z", false) => state.cut_undo.next_undo().map(|_| Msg::UndoCut),
-        ("z", true) | ("y", _) => state.cut_undo.next_redo().map(|_| Msg::RedoCut),
+        ("z", false) => Some(false),
+        ("z", true) | ("y", _) => Some(true),
         _ => None,
     }
+}
+
+/// When the cut change Undo would take back was made, and when the one Redo would make again was.
+pub fn undo_orders(state: &State) -> (Option<u64>, Option<u64>) {
+    if state.cuts_locked || state.job.is_none() {
+        return (None, None);
+    }
+    (state.cut_undo.undo_order(), state.cut_undo.redo_order())
 }
 
 /// The share of the strip each chapter gets. Even a tiny chapter stays something to click.
@@ -1545,8 +1574,14 @@ mod tests {
 
         let _ = update(&mut state, Msg::RemoveCut(0));
         assert_eq!(saved(&state), 0);
-        let ctrl_z = undo_key(&state, &Key::Character("z".into()), Modifiers::CTRL);
-        assert!(matches!(ctrl_z, Some(Msg::UndoCut)));
+        assert_eq!(
+            undo_direction(&Key::Character("z".into()), Modifiers::CTRL),
+            Some(false)
+        );
+        assert!(
+            undo_orders(&state).0.is_some(),
+            "there is a cut change to undo"
+        );
         let _ = update(&mut state, Msg::UndoCut);
         assert_eq!(saved(&state), 1, "the cut is back");
         assert_eq!(
@@ -1558,11 +1593,18 @@ mod tests {
         );
         let _ = update(&mut state, Msg::UndoCut);
         assert_eq!(saved(&state), 0, "and before it was made");
-        assert!(undo_key(&state, &Key::Character("z".into()), Modifiers::CTRL).is_none());
+        assert!(undo_orders(&state).0.is_none(), "nothing more to undo");
         let _ = update(&mut state, Msg::RedoCut);
         assert_eq!(saved(&state), 1);
-        let ctrl_y = undo_key(&state, &Key::Character("y".into()), Modifiers::CTRL);
-        assert!(matches!(ctrl_y, Some(Msg::RedoCut)));
+        assert_eq!(
+            undo_direction(&Key::Character("y".into()), Modifiers::CTRL),
+            Some(true)
+        );
+        assert_eq!(
+            undo_direction(&Key::Character("z".into()), Modifiers::SHIFT),
+            None,
+            "needs Ctrl"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

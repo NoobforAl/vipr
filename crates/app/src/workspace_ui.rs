@@ -87,6 +87,9 @@ pub struct State {
     history: Vec<Entry>,
     /// Counts opens, so clips still loading for an earlier project are dropped.
     generation: u64,
+    /// The combination whose name is being typed: its first letter made the one Undo step for all of
+    /// them. Any other change ends it.
+    renaming: Option<u64>,
     /// `None`: `workspace::temporary_root()`. Tests point it elsewhere.
     temp_root: Option<PathBuf>,
 }
@@ -253,6 +256,10 @@ fn metrics_text(e: &Entry) -> String {
             }
             parts.join(", ")
         }
+        Kind::MarksChanged => match m("marks") {
+            Some(n) => format!("{n:.0} mark{}", if n == 1.0 { "" } else { "s" }),
+            None => String::new(),
+        },
         Kind::CutsChanged => match (m("cuts"), m("cut_seconds")) {
             (Some(0.0), _) => "no cuts".to_string(),
             (Some(n), Some(left_out)) => format!(
@@ -352,6 +359,7 @@ impl App {
     fn ws_snapshot(&mut self, what: &str) {
         let before = self.ws_open().data.clone();
         self.workspace.undo.record(what, before);
+        self.workspace.renaming = None;
     }
 
     /// Files just added to the list become the project's clips.
@@ -784,6 +792,7 @@ impl App {
                     return Task::none();
                 };
                 self.ws_open().data = state;
+                self.workspace.renaming = None;
                 let kind = if redo { Kind::Redone } else { Kind::Undone };
                 self.ws_log(Entry::new(kind, what));
                 self.ws_persist();
@@ -804,14 +813,31 @@ impl App {
                 Task::none()
             }
             Msg::SeqRename(id, name) => {
-                // each letter is no step of its own for Undo, and the log gets the name once exporting
+                // typing one name is one Undo step, not one per letter
                 let name = crate::clean_separators(&name);
-                if let Some(seq) = self.ws_open().data.sequence_mut(id)
-                    && seq.name != name
-                {
-                    seq.name = name;
-                    self.ws_persist();
+                let unchanged = self
+                    .ws_open()
+                    .data
+                    .sequence(id)
+                    .is_none_or(|s| s.name == name);
+                if unchanged {
+                    return Task::none();
                 }
+                if self.workspace.renaming != Some(id) {
+                    let old = self
+                        .ws_open()
+                        .data
+                        .sequence(id)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    self.ws_snapshot("Rename a combination");
+                    self.workspace.renaming = Some(id);
+                    self.ws_log(Entry::new(Kind::SequenceChanged, format!("renamed {old}")));
+                }
+                if let Some(seq) = self.ws_open().data.sequence_mut(id) {
+                    seq.name = name;
+                }
+                self.ws_persist();
                 Task::none()
             }
             Msg::SeqAdd(id, choice) => self.ws_seq_change(id, "Add to a combination", |d| {
@@ -1054,6 +1080,7 @@ impl App {
         let before = self.ws_open().data.clone();
         if change(&mut self.ws_open().data) {
             self.workspace.undo.record(what, before);
+            self.workspace.renaming = None;
             let name = self
                 .ws_open()
                 .data
@@ -1578,8 +1605,30 @@ mod tests {
         assert_eq!(data(&app).sequences[0].items, [seq.items[1]]);
         let _ = app.ws_update(Msg::Undo);
         assert_eq!(data(&app).sequences[0].items, [seq.items[1], seq.items[0]]);
-        let _ = app.ws_update(Msg::SeqRename(seq.id, "Week 12".into()));
+        // typing a name letter by letter is one step for Undo
+        for typed in ["W", "We", "Week", "Week 12"] {
+            let _ = app.ws_update(Msg::SeqRename(seq.id, typed.into()));
+        }
         assert_eq!(data(&app).sequences[0].name, "Week 12");
+        let _ = app.ws_update(Msg::Undo);
+        assert_eq!(
+            data(&app).sequences[0].name,
+            "Combination 1",
+            "the whole name at once"
+        );
+        let _ = app.ws_update(Msg::Redo);
+        assert_eq!(data(&app).sequences[0].name, "Week 12");
+        // a new name after something else is a step of its own
+        let _ = app.ws_update(Msg::SeqMove(seq.id, 1, -1));
+        let _ = app.ws_update(Msg::SeqRename(seq.id, "Week 13".into()));
+        let _ = app.ws_update(Msg::Undo);
+        assert_eq!(data(&app).sequences[0].name, "Week 12");
+        let _ = app.ws_update(Msg::Undo);
+        assert_eq!(
+            data(&app).sequences[0].items,
+            [seq.items[1], seq.items[0]],
+            "and then the move"
+        );
 
         // nothing is transcribed yet, so the export dialog doesn't open
         let _ = app.ws_update(Msg::SeqExport(seq.id));
@@ -1590,6 +1639,77 @@ mod tests {
         assert!(data(&app).sequences.is_empty());
         let _ = app.ws_update(Msg::Undo);
         assert_eq!(data(&app).sequences.len(), 1, "deleting can be undone");
+    }
+
+    #[test]
+    fn in_the_player_one_shortcut_undoes_cuts_and_marks_newest_first() {
+        use crate::{Page, marks_ui, player};
+        use iced::keyboard::{Key, Modifiers};
+        let dir = TestDir::new("shortcut");
+        let mut app = app_in(&dir);
+        let job = crate::JobRef {
+            id: 1,
+            media: dir.0.join("a.mp4"),
+            paths: engine::project::ProjectPaths::new(dir.0.clone(), "a".to_string()),
+        };
+        // the recording is in a project, so its changes are logged
+        app.jobs.push(Job::new(1, job.media.clone(), 1));
+        app.ws_jobs_added(&[1]);
+        app.player = player::for_test(job.clone(), 60.0, 10.0);
+        let _ = marks_ui::open(&mut app.marks, &job);
+        app.page = Page::Player(1);
+        let key = |app: &mut App, c: &str, mods| {
+            let _ = app.route_key(Key::Character(c.into()), mods);
+            saver::wait();
+        };
+        let marks = |app: &App| marks_ui::marks(&app.marks).len();
+
+        // a cut, then a bookmark, then another cut
+        let _ = app.update(Message::Player(player::Msg::CutStart));
+        player::seek_for_test(&mut app.player, 12.0);
+        let _ = app.update(Message::Player(player::Msg::CutEnd));
+        let _ = app.update(Message::Marks(marks_ui::Msg::AddAt(20.0)));
+        player::seek_for_test(&mut app.player, 30.0);
+        let _ = app.update(Message::Player(player::Msg::CutStart));
+        player::seek_for_test(&mut app.player, 35.0);
+        let _ = app.update(Message::Player(player::Msg::CutEnd));
+        assert_eq!((player::cut_count(&app.player), marks(&app)), (2, 1));
+
+        key(&mut app, "z", Modifiers::CTRL);
+        assert_eq!(
+            (player::cut_count(&app.player), marks(&app)),
+            (1, 1),
+            "the second cut first"
+        );
+        key(&mut app, "z", Modifiers::CTRL);
+        assert_eq!(
+            (player::cut_count(&app.player), marks(&app)),
+            (1, 0),
+            "then the bookmark"
+        );
+        key(&mut app, "z", Modifiers::CTRL);
+        assert_eq!(
+            (player::cut_count(&app.player), marks(&app)),
+            (0, 0),
+            "then the first cut"
+        );
+        key(&mut app, "y", Modifiers::CTRL);
+        assert_eq!(
+            (player::cut_count(&app.player), marks(&app)),
+            (1, 0),
+            "redo goes the other way"
+        );
+        key(&mut app, "z", Modifiers::CTRL | Modifiers::SHIFT);
+        assert_eq!((player::cut_count(&app.player), marks(&app)), (1, 1));
+        key(&mut app, "y", Modifiers::CTRL);
+        assert_eq!((player::cut_count(&app.player), marks(&app)), (2, 1));
+
+        // each change reached the project's change log
+        let kinds: Vec<Kind> = app.workspace.history.iter().map(|e| e.kind).collect();
+        assert!(
+            kinds.contains(&Kind::CutsChanged) && kinds.contains(&Kind::MarksChanged),
+            "{kinds:?}"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,7 @@ pub enum Kind {
     SequenceChanged,
     SequenceRemoved,
     CutsChanged,
+    MarksChanged,
     Undone,
     Redone,
     Transcribed,
@@ -54,6 +56,7 @@ impl Kind {
             Kind::SequenceChanged => "Combination changed",
             Kind::SequenceRemoved => "Combination removed",
             Kind::CutsChanged => "Cuts changed",
+            Kind::MarksChanged => "Marks changed",
             Kind::Undone => "Undone",
             Kind::Redone => "Redone",
             Kind::Transcribed => "Transcribed",
@@ -170,12 +173,24 @@ fn read_entries(path: &Path, n: usize) -> Vec<Entry> {
     entries.into_iter().skip(skip).collect()
 }
 
+/// Numbers every recorded change in the whole app, so where two stacks share one Ctrl+Z (cuts and marks
+/// in the player) the newest change can be found: see [`Undo::undo_order`].
+static ORDER: AtomicU64 = AtomicU64::new(1);
+
+/// One step: what it was called, the state on the other side of it, and when it was first made.
+#[derive(Debug, Clone)]
+struct Step<T> {
+    what: String,
+    state: T,
+    order: u64,
+}
+
 /// Undo and redo by snapshots: before each change the caller [`record`](Undo::record)s the state it
 /// had. Snapshots of a project are a few kilobytes, so this is simpler and safer than inverse steps.
 #[derive(Debug, Clone)]
 pub struct Undo<T> {
-    past: VecDeque<(String, T)>,
-    future: Vec<(String, T)>,
+    past: VecDeque<Step<T>>,
+    future: Vec<Step<T>>,
     limit: usize,
 }
 
@@ -197,7 +212,11 @@ impl<T> Undo<T> {
     /// Remembers `before`, the state just before a change called `what`. Clears redo.
     pub fn record(&mut self, what: impl Into<String>, before: T) {
         self.future.clear();
-        self.past.push_back((what.into(), before));
+        self.past.push_back(Step {
+            what: what.into(),
+            state: before,
+            order: ORDER.fetch_add(1, Ordering::Relaxed),
+        });
         while self.past.len() > self.limit {
             self.past.pop_front();
         }
@@ -205,24 +224,43 @@ impl<T> Undo<T> {
 
     /// The state to go back to, given the `current` one, and what the change was.
     pub fn undo(&mut self, current: T) -> Option<(String, T)> {
-        let (what, before) = self.past.pop_back()?;
-        self.future.push((what.clone(), current));
-        Some((what, before))
+        let step = self.past.pop_back()?;
+        self.future.push(Step {
+            what: step.what.clone(),
+            state: current,
+            order: step.order,
+        });
+        Some((step.what, step.state))
     }
 
     pub fn redo(&mut self, current: T) -> Option<(String, T)> {
-        let (what, after) = self.future.pop()?;
-        self.past.push_back((what.clone(), current));
-        Some((what, after))
+        let step = self.future.pop()?;
+        self.past.push_back(Step {
+            what: step.what.clone(),
+            state: current,
+            order: step.order,
+        });
+        Some((step.what, step.state))
     }
 
     /// What Undo would take back, for its tooltip.
     pub fn next_undo(&self) -> Option<&str> {
-        self.past.back().map(|(w, _)| w.as_str())
+        self.past.back().map(|s| s.what.as_str())
     }
 
     pub fn next_redo(&self) -> Option<&str> {
-        self.future.last().map(|(w, _)| w.as_str())
+        self.future.last().map(|s| s.what.as_str())
+    }
+
+    /// When the change Undo would take back was made. Of two stacks, undo the higher one first.
+    pub fn undo_order(&self) -> Option<u64> {
+        self.past.back().map(|s| s.order)
+    }
+
+    /// When the change Redo would make again was first made. Of two stacks, redo the lower one first,
+    /// since undoing went from newest to oldest.
+    pub fn redo_order(&self) -> Option<u64> {
+        self.future.last().map(|s| s.order)
     }
 
     pub fn clear(&mut self) {
@@ -323,5 +361,24 @@ mod tests {
         u.record("set 9", state);
         assert!(u.redo(9).is_none(), "a new change clears redo");
         assert_eq!(u.undo(9).unwrap().1, 3);
+    }
+
+    #[test]
+    fn two_stacks_sharing_one_shortcut_take_turns_in_the_order_things_happened() {
+        let (mut cuts, mut marks): (Undo<i32>, Undo<i32>) = (Undo::default(), Undo::default());
+        cuts.record("cut", 0);
+        marks.record("mark", 0);
+        cuts.record("second cut", 1);
+        // newest first: second cut, then the mark, then the first cut
+        assert!(cuts.undo_order() > marks.undo_order());
+        cuts.undo(2);
+        assert!(marks.undo_order() > cuts.undo_order());
+        marks.undo(1);
+        cuts.undo(1);
+        assert!(cuts.undo_order().is_none() && marks.undo_order().is_none());
+        // redo goes the other way: the first cut, the mark, the second cut
+        assert!(cuts.redo_order() < marks.redo_order());
+        cuts.redo(0);
+        assert!(marks.redo_order() < cuts.redo_order());
     }
 }

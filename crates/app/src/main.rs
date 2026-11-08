@@ -927,9 +927,31 @@ impl App {
             return Task::none();
         }
         if matches!(self.page, Page::Player(_))
-            && let Some(msg) = player::undo_key(&self.player, &key, mods)
+            && let Some(redo) = player::undo_direction(&key, mods)
         {
-            return self.update(Message::Player(msg));
+            // cuts and marks each keep their own steps; one shortcut takes the newest (or, for
+            // redo, the last one undone) of the two
+            let (cut_undo, cut_redo) = player::undo_orders(&self.player);
+            let (mark_undo, mark_redo) = marks_ui::undo_orders(&self.marks);
+            let message = if redo {
+                match (cut_redo, mark_redo) {
+                    (Some(c), Some(m)) if m < c => Some(Message::Marks(marks_ui::Msg::Redo)),
+                    (Some(_), _) => Some(Message::Player(player::Msg::RedoCut)),
+                    (None, Some(_)) => Some(Message::Marks(marks_ui::Msg::Redo)),
+                    (None, None) => None,
+                }
+            } else {
+                match (cut_undo, mark_undo) {
+                    (Some(c), Some(m)) if m > c => Some(Message::Marks(marks_ui::Msg::Undo)),
+                    (Some(_), _) => Some(Message::Player(player::Msg::UndoCut)),
+                    (None, Some(_)) => Some(Message::Marks(marks_ui::Msg::Undo)),
+                    (None, None) => None,
+                }
+            };
+            return match message {
+                Some(message) => self.update(message),
+                None => Task::none(),
+            };
         }
         if let Some(message) = self.ws_key(&key, mods, self.page == Page::Home) {
             return self.update(message);
