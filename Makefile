@@ -15,7 +15,7 @@ TAPLO := uvx taplo
 WORKER_FEATURES := $(if $(filter cpu,$(BACKEND)),,--features $(BACKEND))
 
 .DEFAULT_GOAL := help
-.PHONY: help dev run build workers package setup fix lint test check models gpu clean
+.PHONY: help dev run build workers package setup fix lint test bench check models gpu clean
 
 define HELP_TEXT
 ViPr commands
@@ -28,6 +28,7 @@ Code quality
   make fix       Apply lint fixes and format all Rust, Python and TOML files
   make lint      Report format and lint problems, changing nothing
   make test      Run all Rust tests
+  make bench     Run the engine benchmarks (resampling, subtitle parsing)
   make check     lint + test, for use before a commit
 
 Build
@@ -82,6 +83,9 @@ lint:
 
 test:
 	cargo test --workspace
+
+bench:
+	cargo bench -p engine
 
 check: lint test
 
