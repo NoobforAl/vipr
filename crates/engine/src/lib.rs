@@ -19,6 +19,7 @@ pub mod prompts;
 pub mod registry;
 pub mod sanitize;
 pub mod settings;
+pub mod style;
 pub mod subalign;
 pub mod subparse;
 pub mod subtitles;

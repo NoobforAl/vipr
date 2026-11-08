@@ -574,6 +574,7 @@ fn export(
             &pipeline::retime_cues(&cues, &cuts),
             &lang,
             options.subtitle_format,
+            &options.style,
         );
         fsio::write_atomic(out, text.as_bytes())
             .map_err(|e| format!("cannot write {} ({e})", out.display()))?;
@@ -588,30 +589,72 @@ fn export(
         );
     }
     // drawn subtitles go on before the cuts, a track is a separate file and moves with them
-    let srt = match (options.kind, options.subtitles) {
-        (Kind::Video, SubtitleMode::Burn) => {
-            Some(pipeline::subtitle_text(&cues, &lang, SubtitleFormat::Srt))
-        }
-        (Kind::Video, SubtitleMode::Track) => Some(pipeline::subtitle_text(
-            &pipeline::retime_cues(&cues, &cuts),
-            &lang,
-            SubtitleFormat::Srt,
-        )),
-        _ => None,
-    };
+    // drawn subtitles go on before the cuts; a track is a separate file and moves with them
+    let subtitles = options.subtitle_file().map(|ext| {
+        let timed = if options.subtitles == SubtitleMode::Track {
+            pipeline::retime_cues(&cues, &cuts)
+        } else {
+            cues.clone()
+        };
+        let format = if ext == "ass" {
+            SubtitleFormat::Ass
+        } else {
+            SubtitleFormat::Srt
+        };
+        (
+            pipeline::subtitle_text(&timed, &lang, format, &options.style),
+            ext,
+        )
+    });
     emit(RunEvent::Detail(match options.kind {
         Kind::Audio => "Saving the sound".to_string(),
         _ => format!("Making the {} video", options.container.label()),
     }));
     pipeline::run_export(
         &ffmpeg,
-        (options, &run.job.media, srt.as_deref()),
+        (
+            options,
+            &run.job.media,
+            subtitles.as_ref().map(|(text, ext)| (text.as_str(), *ext)),
+        ),
         (&paths.dir, out),
         (t.audio_seconds, &cuts),
         &paths.dir.join("export.log"),
         &mut |done| emit(RunEvent::Progress(done)),
     )?;
     Ok(finished)
+}
+
+/// A frame of the recording with its subtitles drawn as `options` say, for the export dialog: PNG bytes, and the moment
+/// it shows. Touches the disk and runs ffmpeg, so call it off the UI thread.
+pub fn export_preview(job: &JobRef, options: &ExportOptions) -> Result<(Vec<u8>, f64), String> {
+    let ffmpeg =
+        engine::audio::find_ffmpeg().ok_or("a preview needs ffmpeg. Get it in Settings first.")?;
+    if !job.media.is_file() {
+        return Err("the recording is not where it was.".into());
+    }
+    let paths = &job.paths;
+    let t = Transcript::load(&paths.transcript()).map_err(|e| load_error("the transcript", e))?;
+    let translation: Option<TranslationFile> = match &options.lang {
+        None => None,
+        Some(code) => {
+            check_name(code)?;
+            Some(
+                fsio::load_json(&paths.translation(code))
+                    .map_err(|e| load_error("the translation", e))?,
+            )
+        }
+    };
+    let (cues, lang) = pipeline::export_cues(&t, translation.as_ref());
+    // a line a third of the way in: past any silence at the start, and a real sentence
+    let cue = cues
+        .get(cues.len() / 3)
+        .or(cues.first())
+        .ok_or("there are no subtitles to preview.")?;
+    let at = cue.start + ((cue.end - cue.start) / 2.0).min(1.0);
+    let ass = pipeline::subtitle_text(&cues, &lang, SubtitleFormat::Ass, &options.style);
+    let png = pipeline::preview_frame(&ffmpeg, &job.media, &ass, at)?;
+    Ok((png, at))
 }
 
 // ------------------------------------------------------------------------- chapters

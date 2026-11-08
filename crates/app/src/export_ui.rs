@@ -4,12 +4,15 @@
 use std::path::PathBuf;
 
 use engine::cuts::{self, Cut, CutsFile};
-use iced::widget::{Column, button, column, container, row, scrollable, space, text};
+use engine::style::{Align, Place, SubtitleStyle};
+use iced::widget::{
+    Column, button, column, container, image, row, scrollable, slider, space, text,
+};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::export::{
     AudioFormat, Codec, Container, Encoder, ExportOptions, Kind, Quality, Resolution,
-    SubtitleFormat, SubtitleMode, TextSize,
+    SubtitleFormat, SubtitleMode,
 };
 use crate::icons;
 use crate::out::{JobKind, JobRef, Out};
@@ -28,6 +31,10 @@ pub struct State {
     /// An NVIDIA graphics card was found.
     gpu: bool,
     error: Option<String>,
+    /// The last preview frame, the moment it shows, and the choices it was made with.
+    preview: Option<(image::Handle, f64, ExportOptions)>,
+    previewing: bool,
+    preview_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +48,24 @@ pub enum Msg {
     Resolution(Resolution),
     Subtitles(SubtitleMode),
     Language(Option<String>),
-    TextSize(TextSize),
+    Font(String),
+    Size(f32),
+    Bold(bool),
+    Italic(bool),
+    Color(u32),
+    OutlineColor(u32),
+    Outline(f32),
+    Shadow(f32),
+    Box(bool),
+    BoxColor(u32),
+    BoxOpacity(f32),
+    Place(Place),
+    Align(Align),
+    Margin(f32),
+    ResetStyle,
+    /// Draw a frame with these choices.
+    Preview,
+    PreviewReady(Result<(Vec<u8>, f64), String>),
     ApplyCuts(bool),
     SubtitleFormat(SubtitleFormat),
     AudioFormat(AudioFormat),
@@ -51,7 +75,14 @@ pub enum Msg {
 }
 
 /// Opens the dialog for `job`. Choices made earlier stay, except the language, which follows what is on show.
-pub fn open(state: &mut State, job: JobRef, lang: Option<String>, duration: f64, gpu: bool) {
+/// `style` is the one used last.
+pub fn open(
+    state: &mut State,
+    job: JobRef,
+    (lang, style): (Option<String>, SubtitleStyle),
+    duration: f64,
+    gpu: bool,
+) {
     let cuts = std::fs::read_to_string(job.paths.cuts())
         .ok()
         .and_then(|text| serde_json::from_str::<CutsFile>(&text).ok())
@@ -63,6 +94,10 @@ pub fn open(state: &mut State, job: JobRef, lang: Option<String>, duration: f64,
     state.duration = duration;
     state.gpu = gpu;
     state.error = None;
+    state.options.style = style;
+    state.preview = None;
+    state.previewing = false;
+    state.preview_error = None;
     if !gpu && state.options.encoder == Encoder::Gpu {
         state.options.encoder = Encoder::Auto;
     }
@@ -85,7 +120,48 @@ pub fn update(state: &mut State, msg: Msg) -> (Task<Msg>, Out) {
         Msg::Resolution(r) => o.resolution = r,
         Msg::Subtitles(m) => o.subtitles = m,
         Msg::Language(l) => o.lang = l,
-        Msg::TextSize(s) => o.text_size = s,
+        Msg::Font(f) => o.style.font = f,
+        Msg::Size(v) => o.style.size = v.round() as u32,
+        Msg::Bold(b) => o.style.bold = b,
+        Msg::Italic(i) => o.style.italic = i,
+        Msg::Color(rgb) => o.style.color = rgb,
+        Msg::OutlineColor(rgb) => o.style.outline_color = rgb,
+        Msg::Outline(v) => o.style.outline = (v * 2.0).round() / 2.0,
+        Msg::Shadow(v) => o.style.shadow = (v * 2.0).round() / 2.0,
+        Msg::Box(on) => o.style.box_on = on,
+        Msg::BoxColor(rgb) => o.style.box_color = rgb,
+        Msg::BoxOpacity(v) => o.style.box_opacity = v.round().clamp(0.0, 100.0) as u8,
+        Msg::Place(pl) => o.style.place = pl,
+        Msg::Align(a) => o.style.align = a,
+        Msg::Margin(v) => o.style.margin = v.round() as u32,
+        Msg::ResetStyle => o.style = SubtitleStyle::default(),
+        Msg::Preview => {
+            let Some(job) = state.job.clone() else {
+                return (Task::none(), Out::None);
+            };
+            let options = state.options.clone();
+            state.previewing = true;
+            state.preview_error = None;
+            return (
+                Task::perform(
+                    crate::import_ui::on_thread(move || {
+                        crate::jobs::export_preview(&job, &options)
+                    }),
+                    Msg::PreviewReady,
+                ),
+                Out::None,
+            );
+        }
+        Msg::PreviewReady(result) => {
+            state.previewing = false;
+            match result {
+                Ok((png, at)) => {
+                    state.preview =
+                        Some((image::Handle::from_bytes(png), at, state.options.clone()));
+                }
+                Err(e) => state.preview_error = Some(e),
+            }
+        }
         Msg::ApplyCuts(yes) => o.apply_cuts = yes,
         Msg::SubtitleFormat(f) => o.subtitle_format = f,
         Msg::AudioFormat(f) => o.audio_format = f,
@@ -224,6 +300,282 @@ fn note(state: &State) -> Option<&'static str> {
         ),
         (Codec::H264, _) => None,
     }
+}
+
+// ------------------------------------------------------------------------- text style
+
+/// Fonts offered, with the file that has to be there for each. Each covers Latin letters; Tahoma, Segoe UI, Arial and
+/// Times New Roman also cover Persian and Arabic.
+const FONTS: [(&str, &str); 10] = [
+    ("Arial", "arial.ttf"),
+    ("Segoe UI", "segoeui.ttf"),
+    ("Tahoma", "tahoma.ttf"),
+    ("Verdana", "verdana.ttf"),
+    ("Calibri", "calibri.ttf"),
+    ("Trebuchet MS", "trebuc.ttf"),
+    ("Georgia", "georgia.ttf"),
+    ("Times New Roman", "times.ttf"),
+    ("Consolas", "consola.ttf"),
+    ("Impact", "impact.ttf"),
+];
+
+/// The fonts this computer has. Elsewhere than Windows all are offered, and the system finds a near one.
+fn fonts() -> Vec<&'static str> {
+    let Some(dir) = std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")) else {
+        return FONTS.iter().map(|(name, _)| *name).collect();
+    };
+    FONTS
+        .iter()
+        .filter(|(_, file)| dir.join(file).is_file())
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+const TEXT_COLORS: [(&str, u32); 7] = [
+    ("White", 0xFFFFFF),
+    ("Yellow", 0xFFE14D),
+    ("Cyan", 0x66E0FF),
+    ("Green", 0x7CFC8A),
+    ("Orange", 0xFFA040),
+    ("Pink", 0xFF7EC8),
+    ("Black", 0x000000),
+];
+const EDGE_COLORS: [(&str, u32); 3] = [
+    ("Black", 0x000000),
+    ("Dark grey", 0x404040),
+    ("White", 0xFFFFFF),
+];
+const BOX_COLORS: [(&str, u32); 4] = [
+    ("Black", 0x000000),
+    ("Dark grey", 0x303030),
+    ("Dark blue", 0x0B3D91),
+    ("White", 0xFFFFFF),
+];
+
+fn rgb(c: u32) -> iced::Color {
+    iced::Color::from_rgb8((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+/// A colour to pick: a small swatch, outlined when chosen.
+fn swatch<'a>(name: &'a str, color: u32, chosen: bool, msg: Msg, t: Tokens) -> Element<'a, Msg> {
+    let fill = container(space())
+        .width(18)
+        .height(18)
+        .style(theme::rounded_fill(rgb(color), 3.0));
+    iced::widget::tooltip(
+        button(fill)
+            .padding(4)
+            .style(theme::segment(t, chosen))
+            .on_press(msg),
+        container(text(name).size(12).color(t.text))
+            .padding([4, 8])
+            .style(theme::toast(t)),
+        iced::widget::tooltip::Position::Top,
+    )
+    .into()
+}
+
+/// A slider with its value next to it.
+fn amount<'a>(
+    range: std::ops::RangeInclusive<f32>,
+    value: f32,
+    step: f32,
+    shown: String,
+    msg: fn(f32) -> Msg,
+    t: Tokens,
+) -> Vec<Element<'a, Msg>> {
+    vec![
+        slider(range, value, msg)
+            .step(step)
+            .width(Length::Fixed(220.0))
+            .into(),
+        text(shown).size(12).color(t.muted).into(),
+    ]
+}
+
+fn style_section(state: &State, t: Tokens) -> Element<'_, Msg> {
+    let s = &state.options.style;
+    let fonts = fonts()
+        .into_iter()
+        .map(|name| choice(name, s.font == name, true, Msg::Font(name.to_string()), t))
+        .collect();
+    let weight = vec![
+        choice("Bold", s.bold, true, Msg::Bold(!s.bold), t),
+        choice("Italic", s.italic, true, Msg::Italic(!s.italic), t),
+    ];
+    let colors = TEXT_COLORS
+        .iter()
+        .map(|(name, c)| swatch(name, *c, s.color == *c, Msg::Color(*c), t))
+        .collect();
+    let mut lines = vec![
+        line("Font", fonts, t),
+        line(
+            "Size",
+            amount(
+                20.0..=120.0,
+                s.size as f32,
+                1.0,
+                format!("{} px", s.size),
+                Msg::Size,
+                t,
+            ),
+            t,
+        ),
+        line("Style", weight, t),
+        line("Colour", colors, t),
+        line(
+            "Background",
+            vec![
+                choice("Outline", !s.box_on, true, Msg::Box(false), t),
+                choice("Box", s.box_on, true, Msg::Box(true), t),
+            ],
+            t,
+        ),
+    ];
+    if s.box_on {
+        let box_colors = BOX_COLORS
+            .iter()
+            .map(|(name, c)| swatch(name, *c, s.box_color == *c, Msg::BoxColor(*c), t))
+            .collect();
+        lines.push(line("Box colour", box_colors, t));
+        lines.push(line(
+            "Box cover",
+            amount(
+                0.0..=100.0,
+                f32::from(s.box_opacity),
+                5.0,
+                format!("{}%", s.box_opacity),
+                Msg::BoxOpacity,
+                t,
+            ),
+            t,
+        ));
+    } else {
+        let mut edge: Vec<Element<'_, Msg>> = EDGE_COLORS
+            .iter()
+            .map(|(name, c)| swatch(name, *c, s.outline_color == *c, Msg::OutlineColor(*c), t))
+            .collect();
+        edge.extend(amount(
+            0.0..=8.0,
+            s.outline,
+            0.5,
+            format!("{:.1} px", s.outline),
+            Msg::Outline,
+            t,
+        ));
+        lines.push(line("Outline", edge, t));
+        lines.push(line(
+            "Shadow",
+            amount(
+                0.0..=6.0,
+                s.shadow,
+                0.5,
+                format!("{:.1} px", s.shadow),
+                Msg::Shadow,
+                t,
+            ),
+            t,
+        ));
+    }
+    let places = [
+        ("Bottom", Place::Bottom),
+        ("Middle", Place::Middle),
+        ("Top", Place::Top),
+    ]
+    .iter()
+    .map(|(l, p)| choice(l, s.place == *p, true, Msg::Place(*p), t))
+    .collect();
+    let aligns = [
+        ("Left", Align::Left),
+        ("Centre", Align::Center),
+        ("Right", Align::Right),
+    ]
+    .iter()
+    .map(|(l, a)| choice(l, s.align == *a, true, Msg::Align(*a), t))
+    .collect();
+    lines.push(line("Position", places, t));
+    lines.push(line("Line up", aligns, t));
+    if s.place != Place::Middle {
+        lines.push(line(
+            "From the edge",
+            amount(
+                0.0..=300.0,
+                s.margin as f32,
+                5.0,
+                format!("{} px", s.margin),
+                Msg::Margin,
+                t,
+            ),
+            t,
+        ));
+    }
+
+    // the preview, when the video is what is made
+    if state.options.kind == Kind::Video {
+        let stale = state
+            .preview
+            .as_ref()
+            .is_some_and(|(_, _, made_with)| made_with != &state.options);
+        let label = match (state.previewing, &state.preview, stale) {
+            (true, ..) => "Making the preview...",
+            (false, None, _) => "Show a preview",
+            (false, Some(_), true) => "Update the preview",
+            (false, Some(_), false) => "Preview is up to date",
+        };
+        // the button stands out while the frame shown is not what the export would make
+        let hot = stale || state.preview.is_none();
+        let mut actions = row![
+            button(text(label).size(12))
+                .padding([5, 10])
+                .style(move |theme_, status| {
+                    if hot {
+                        theme::primary(t)(theme_, status)
+                    } else {
+                        theme::outline_btn(t)(theme_, status)
+                    }
+                })
+                .on_press_maybe((!state.previewing).then_some(Msg::Preview)),
+            button(text("Reset the style").size(12))
+                .padding([5, 10])
+                .style(theme::outline_btn(t))
+                .on_press(Msg::ResetStyle),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if let Some((_, at, _)) = &state.preview {
+            actions = actions.push(
+                text(format!("A frame at {}", engine::transcript::clock(*at)))
+                    .size(12)
+                    .color(t.faint),
+            );
+        }
+        lines.push(actions.into());
+        if let Some(e) = &state.preview_error {
+            lines.push(
+                text(format!("No preview: {e}"))
+                    .size(12)
+                    .color(t.bad)
+                    .into(),
+            );
+        }
+        if let Some((handle, ..)) = &state.preview {
+            lines.push(
+                container(image(handle.clone()).width(Length::Fill))
+                    .width(Length::Fill)
+                    .style(theme::rounded_fill(iced::Color::BLACK, 4.0))
+                    .into(),
+            );
+        }
+    } else {
+        lines.push(
+            button(text("Reset the style").size(12))
+                .padding([5, 10])
+                .style(theme::outline_btn(t))
+                .on_press(Msg::ResetStyle)
+                .into(),
+        );
+    }
+    section("Text style", lines, t)
 }
 
 // ------------------------------------------------------------------------- view
@@ -405,17 +757,6 @@ pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
             if o.subtitles != SubtitleMode::Off {
                 lines.push(language_line(t));
             }
-            if o.subtitles == SubtitleMode::Burn {
-                let text_sizes = [
-                    ("Small", TextSize::Small),
-                    ("Medium", TextSize::Medium),
-                    ("Large", TextSize::Large),
-                ]
-                .iter()
-                .map(|(l, s)| choice(l, o.text_size == *s, true, Msg::TextSize(*s), t))
-                .collect();
-                lines.push(line("Text size", text_sizes, t));
-            }
             body = body.push(section("Subtitles", lines, t));
         }
         Kind::Subtitles => {
@@ -423,6 +764,7 @@ pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
                 ("SRT", SubtitleFormat::Srt),
                 ("WebVTT", SubtitleFormat::Vtt),
                 ("Text", SubtitleFormat::Txt),
+                ("ASS (styled)", SubtitleFormat::Ass),
             ]
             .iter()
             .map(|(l, f)| choice(l, o.subtitle_format == *f, true, Msg::SubtitleFormat(*f), t))
@@ -445,6 +787,10 @@ pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
             .collect();
             body = body.push(section("Sound", vec![line("File type", formats, t)], t));
         }
+    }
+
+    if o.uses_style() {
+        body = body.push(style_section(state, t));
     }
 
     if !state.cuts.is_empty() {
@@ -507,16 +853,21 @@ pub fn view(state: &State, t: Tokens) -> Element<'_, Msg> {
     .spacing(10)
     .align_y(Alignment::Center);
 
+    // a video's many choices outgrow the window: they scroll, and the summary and Export stay in view. The shorter
+    // kinds keep a dialog only as tall as they are.
+    let tall = o.kind == Kind::Video || o.uses_style();
+    let height = if tall { Length::Fill } else { Length::Shrink };
     container(
         column![
             header,
-            scrollable(body.padding(iced::Padding::ZERO.right(12))).height(Length::Shrink),
+            scrollable(body.padding(iced::Padding::ZERO.right(12))).height(height),
             footer,
         ]
         .spacing(14),
     )
     .padding(20)
     .max_width(680)
+    .height(height)
     .style(theme::dialog(t))
     .into()
 }
@@ -536,7 +887,7 @@ mod tests {
 
     fn opened() -> State {
         let mut s = State::default();
-        open(&mut s, job(), None, 600.0, true);
+        open(&mut s, job(), (None, SubtitleStyle::default()), 600.0, true);
         s
     }
 
@@ -566,6 +917,35 @@ mod tests {
     }
 
     #[test]
+    fn style_choices_land_in_the_options_and_reset_brings_the_defaults_back() {
+        let mut s = opened();
+        let _ = update(&mut s, Msg::Size(71.6));
+        let _ = update(&mut s, Msg::Box(true));
+        let _ = update(&mut s, Msg::BoxOpacity(140.0));
+        let _ = update(&mut s, Msg::Outline(2.3));
+        let _ = update(&mut s, Msg::Place(Place::Top));
+        let st = &s.options.style;
+        assert_eq!(st.size, 72);
+        assert!(st.box_on);
+        assert_eq!(st.box_opacity, 100, "never more than all");
+        assert_eq!(st.outline, 2.5, "half pixel steps");
+        assert_eq!(st.place, Place::Top);
+        let _ = update(&mut s, Msg::ResetStyle);
+        assert_eq!(s.options.style, SubtitleStyle::default());
+    }
+
+    #[test]
+    fn the_style_used_last_comes_back_when_the_dialog_opens() {
+        let mut s = State::default();
+        let mine = SubtitleStyle {
+            size: 80,
+            ..SubtitleStyle::default()
+        };
+        open(&mut s, job(), (None, mine.clone()), 600.0, true);
+        assert_eq!(s.options.style, mine);
+    }
+
+    #[test]
     fn the_recording_itself_is_never_the_target() {
         let mut s = opened();
         let (_, out) = update(&mut s, Msg::Chosen(Some(PathBuf::from("talk.mp4"))));
@@ -583,7 +963,13 @@ mod tests {
             },
             ..State::default()
         };
-        open(&mut s, job(), None, 600.0, false);
+        open(
+            &mut s,
+            job(),
+            (None, SubtitleStyle::default()),
+            600.0,
+            false,
+        );
         assert_eq!(s.options.encoder, Encoder::Auto);
         assert!(summary(&s).contains("on the processor"));
     }
@@ -591,7 +977,13 @@ mod tests {
     #[test]
     fn a_language_the_result_lacks_falls_back_to_the_original() {
         let mut s = State::default();
-        open(&mut s, job(), Some("fa".into()), 600.0, true);
+        open(
+            &mut s,
+            job(),
+            (Some("fa".into()), SubtitleStyle::default()),
+            600.0,
+            true,
+        );
         assert_eq!(s.options.lang, None);
     }
 }

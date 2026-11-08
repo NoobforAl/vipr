@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::registry::Role;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     /// Chosen model id per role. Missing role = use the recommended model.
     #[serde(default)]
@@ -31,6 +31,9 @@ pub struct Settings {
     /// Id of the profile used for new runs (see `profiles.rs`). `None` = no profile.
     #[serde(default)]
     pub active_profile: Option<String>,
+    /// The text style last used for an export.
+    #[serde(default)]
+    pub subtitle_style: crate::style::SubtitleStyle,
 }
 
 /// Dark, as an editor's panels are, whatever the system uses. "system" still follows it when chosen.
@@ -51,6 +54,7 @@ impl Default for Settings {
             cleanup: true,
             num_speakers: 0,
             active_profile: None,
+            subtitle_style: crate::style::SubtitleStyle::default(),
         }
     }
 }

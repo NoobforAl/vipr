@@ -10,7 +10,7 @@ cpal = "0.18"
 dirs = "7.0.0"
 engine = { version = "0.1.0", path = "../engine" }
 gpu-detect = { version = "0.1.0", path = "../gpu-detect", default-features = false }
-iced = { version = "0.14.0", features = ["svg"] }
+iced = { version = "0.14.0", features = ["image", "svg"] }
 png = "0.18.1"
 rfd = "0.17.2"
 rtrb = "0.4"

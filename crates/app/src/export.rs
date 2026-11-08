@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use engine::cuts::{self, Cut};
+use engine::style::SubtitleStyle;
 
 /// What comes out of an export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,17 +64,12 @@ pub enum SubtitleMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextSize {
-    Small,
-    Medium,
-    Large,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubtitleFormat {
     Srt,
     Vtt,
     Txt,
+    /// Keeps the text style: font, colours, box and position.
+    Ass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +91,8 @@ pub struct ExportOptions {
     pub subtitles: SubtitleMode,
     /// A translation's language code. `None` is the original text.
     pub lang: Option<String>,
-    pub text_size: TextSize,
+    /// How drawn subtitles, a styled track and an ASS file look.
+    pub style: SubtitleStyle,
     pub apply_cuts: bool,
     pub subtitle_format: SubtitleFormat,
     pub audio_format: AudioFormat,
@@ -112,7 +109,7 @@ impl Default for ExportOptions {
             resolution: Resolution::Original,
             subtitles: SubtitleMode::Burn,
             lang: None,
-            text_size: TextSize::Medium,
+            style: SubtitleStyle::default(),
             apply_cuts: true,
             subtitle_format: SubtitleFormat::Srt,
             audio_format: AudioFormat::Mp3,
@@ -167,7 +164,8 @@ impl Container {
     fn subtitle_codec(self) -> &'static str {
         match self {
             Container::Mp4 | Container::Mov => "mov_text",
-            Container::Mkv => "srt",
+            // an ASS track keeps the text style in players that show it
+            Container::Mkv => "ass",
             Container::Webm => "webvtt",
         }
     }
@@ -220,22 +218,13 @@ impl Resolution {
     }
 }
 
-impl TextSize {
-    fn font_size(self) -> u32 {
-        match self {
-            TextSize::Small => 13,
-            TextSize::Medium => 16,
-            TextSize::Large => 20,
-        }
-    }
-}
-
 impl SubtitleFormat {
     pub fn extension(self) -> &'static str {
         match self {
             SubtitleFormat::Srt => "srt",
             SubtitleFormat::Vtt => "vtt",
             SubtitleFormat::Txt => "txt",
+            SubtitleFormat::Ass => "ass",
         }
     }
 }
@@ -270,6 +259,23 @@ impl ExportOptions {
         if self.encoder == Encoder::Gpu && self.codec.gpu_encoder().is_none() {
             self.encoder = Encoder::Auto;
         }
+    }
+
+    /// The subtitle file ffmpeg reads for this export, by its ending: styled ASS where the style is used, plain SRT
+    /// for a track in a container that only takes plain text. `None` when no subtitles go in.
+    pub fn subtitle_file(&self) -> Option<&'static str> {
+        match (self.kind, self.subtitles) {
+            (Kind::Video, SubtitleMode::Burn) => Some("ass"),
+            (Kind::Video, SubtitleMode::Track) if self.container == Container::Mkv => Some("ass"),
+            (Kind::Video, SubtitleMode::Track) => Some("srt"),
+            _ => None,
+        }
+    }
+
+    /// The text style is used by what this export makes.
+    pub fn uses_style(&self) -> bool {
+        self.subtitle_file() == Some("ass")
+            || (self.kind == Kind::Subtitles && self.subtitle_format == SubtitleFormat::Ass)
     }
 
     /// The video encoder settings to try, in order: an attempt that fails moves on to the next.
@@ -340,10 +346,8 @@ impl ExportOptions {
                 }
                 let mut chain = Vec::new();
                 if let Some(file) = subtitles.filter(|_| self.subtitles == SubtitleMode::Burn) {
-                    chain.push(format!(
-                        "subtitles={file}:force_style='FontName=Arial,FontSize={},Outline=2,Shadow=1,MarginV=20'",
-                        self.text_size.font_size()
-                    ));
+                    // the ASS file carries the whole style
+                    chain.push(format!("subtitles={file}"));
                 }
                 if let Some(h) = self.resolution.height() {
                     chain.push(format!("scale=-2:'min(ih,{h})'"));
@@ -486,7 +490,6 @@ mod tests {
     fn drawn_subtitles_scaling_and_cuts_go_into_one_graph() {
         let o = ExportOptions {
             resolution: Resolution::P720,
-            text_size: TextSize::Large,
             ..ExportOptions::default()
         };
         let cuts = [Cut {
@@ -495,16 +498,16 @@ mod tests {
         }];
         let args = o.ffmpeg_args(
             Path::new("in.mp4"),
-            Some("s.srt"),
+            Some("s.ass"),
             (100.0, &cuts),
             &[],
             Path::new("out.part"),
         );
         let all = joined(&args);
-        assert!(all.contains(
-            "-filter_complex [0:v:0]subtitles=s.srt:force_style='FontName=Arial,FontSize=20"
-        ));
-        assert!(all.contains(",scale=-2:'min(ih,720)',split=2"));
+        assert!(
+            all.contains("-filter_complex [0:v:0]subtitles=s.ass,scale=-2:'min(ih,720)',split=2"),
+            "{all}"
+        );
         assert!(all.contains("-map [v] -map [a]"));
         assert!(all.ends_with("-f mp4 -progress pipe:1 -nostats out.part"));
         assert!(!all.contains("-vf"));
@@ -514,7 +517,7 @@ mod tests {
     fn a_subtitle_track_is_a_second_input_in_the_container_s_own_format() {
         for (container, codec) in [
             (Container::Mp4, "mov_text"),
-            (Container::Mkv, "srt"),
+            (Container::Mkv, "ass"),
             (Container::Webm, "webvtt"),
         ] {
             let o = ExportOptions {
@@ -559,6 +562,36 @@ mod tests {
         ));
         assert!(cut.contains("-map [a] -vn"), "{cut}");
         assert!(!cut.contains("[0:v:0]"), "{cut}");
+    }
+
+    #[test]
+    fn the_style_is_used_where_it_can_show_and_plain_text_elsewhere() {
+        let at = |subtitles, container| ExportOptions {
+            subtitles,
+            container,
+            ..ExportOptions::default()
+        };
+        assert_eq!(
+            at(SubtitleMode::Burn, Container::Mp4).subtitle_file(),
+            Some("ass")
+        );
+        assert_eq!(
+            at(SubtitleMode::Track, Container::Mkv).subtitle_file(),
+            Some("ass")
+        );
+        assert_eq!(
+            at(SubtitleMode::Track, Container::Mp4).subtitle_file(),
+            Some("srt")
+        );
+        assert_eq!(at(SubtitleMode::Off, Container::Mp4).subtitle_file(), None);
+        assert!(!at(SubtitleMode::Track, Container::Mp4).uses_style());
+        let ass_file = ExportOptions {
+            kind: Kind::Subtitles,
+            subtitle_format: SubtitleFormat::Ass,
+            ..ExportOptions::default()
+        };
+        assert!(ass_file.uses_style());
+        assert_eq!(ass_file.extension(), "ass");
     }
 
     #[test]

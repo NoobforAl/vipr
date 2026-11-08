@@ -1812,6 +1812,13 @@ impl App {
             }
             Message::Export(msg) => {
                 let (task, out) = export_ui::update(&mut self.export, msg);
+                // the next export starts from the style this one used
+                if let Out::Enqueue(out::JobKind::Export { options, .. }) = &out
+                    && options.style != self.settings.subtitle_style
+                {
+                    self.settings.subtitle_style = options.style.clone();
+                    self.save_settings();
+                }
                 Task::batch([task.map(Message::Export), self.handle_out(out)])
             }
             Message::Review(msg) => {
@@ -1875,7 +1882,8 @@ impl App {
             .detection
             .as_ref()
             .is_none_or(|d| d.recommended == gpu_detect::Backend::Cuda);
-        export_ui::open(&mut self.export, job, lang, duration, gpu);
+        let style = self.settings.subtitle_style.clone();
+        export_ui::open(&mut self.export, job, (lang, style), duration, gpu);
         Task::none()
     }
 

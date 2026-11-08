@@ -17,6 +17,7 @@ use engine::cuts::Cut;
 use engine::fsio;
 use engine::profiles::{GlossaryTerm, Profile};
 use engine::project::{CueStatus, ProjectMeta, ProjectPaths, TimedText, TranslationFile};
+use engine::style::SubtitleStyle;
 use engine::subtitles::{
     Cue, SubtitleOptions, build_cues, mark_rtl, mark_rtl_text, to_srt, to_vtt, wrap,
 };
@@ -690,8 +691,14 @@ pub fn retime_cues(cues: &[Cue], cuts: &[Cut]) -> Vec<Cue> {
 }
 
 /// A subtitle file's text: `srt`, `vtt` or `txt`.
-pub fn subtitle_text(cues: &[Cue], lang: &str, format: SubtitleFormat) -> String {
+pub fn subtitle_text(
+    cues: &[Cue],
+    lang: &str,
+    format: SubtitleFormat,
+    style: &SubtitleStyle,
+) -> String {
     match format {
+        SubtitleFormat::Ass => engine::style::to_ass(&mark_rtl(cues, lang), style),
         SubtitleFormat::Srt => to_srt(&mark_rtl(cues, lang)),
         SubtitleFormat::Vtt => to_vtt(&mark_rtl(cues, lang)),
         SubtitleFormat::Txt => {
@@ -701,24 +708,25 @@ pub fn subtitle_text(cues: &[Cue], lang: &str, format: SubtitleFormat) -> String
     }
 }
 
-/// The subtitle file ffmpeg reads while exporting. A fixed plain name in the folder ffmpeg runs in: a full Windows path
-/// would need escaping in a filter, and a wrong escape is a broken export.
-const EXPORT_SUBTITLES: &str = "vipr-export.srt";
+/// The subtitle file ffmpeg reads while exporting, without its ending. A fixed plain name in the folder ffmpeg runs in:
+/// a full Windows path would need escaping in a filter, and a wrong escape is a broken export.
+const EXPORT_SUBTITLES: &str = "vipr-export";
 
 /// Runs an export with ffmpeg: `srt` is the subtitle file it reads, if any. `dirs` is the folder to work in and the
 /// file to write. Each of `options`' encoder attempts is tried in turn until one runs. Writes to a `.part` file and
 /// renames it at the end, so a failed or cancelled export never leaves a broken file behind. `on_progress` gets 0..1.
 pub fn run_export(
     ffmpeg: &Path,
-    (options, media, srt): (&ExportOptions, &Path, Option<&str>),
+    (options, media, subtitles): (&ExportOptions, &Path, Option<(&str, &str)>),
     dirs: (&Path, &Path),
     (duration, cuts): (f64, &[Cut]),
     log: &Path,
     on_progress: &mut dyn FnMut(f32),
 ) -> Result<(), String> {
     let (work_dir, out) = dirs;
-    let subs = work_dir.join(EXPORT_SUBTITLES);
-    if let Some(text) = srt {
+    let name = subtitles.map(|(_, ext)| format!("{EXPORT_SUBTITLES}.{ext}"));
+    let subs = work_dir.join(name.as_deref().unwrap_or(EXPORT_SUBTITLES));
+    if let Some((text, _)) = subtitles {
         fsio::write_atomic(&subs, text.as_bytes())
             .map_err(|e| format!("cannot write the subtitles: {e}"))?;
     }
@@ -726,13 +734,7 @@ pub fn run_export(
     let out_seconds = duration - engine::cuts::removed(cuts);
     let mut result = Err("no encoder could run".to_string());
     for video in options.video_attempts() {
-        let args = options.ffmpeg_args(
-            media,
-            srt.map(|_| EXPORT_SUBTITLES),
-            (duration, cuts),
-            &video,
-            &part,
-        );
+        let args = options.ffmpeg_args(media, name.as_deref(), (duration, cuts), &video, &part);
         result = run_ffmpeg(ffmpeg, work_dir, &args, out_seconds, log, on_progress);
         if result.is_ok() || CANCELLED.load(Ordering::SeqCst) {
             break;
@@ -754,6 +756,46 @@ pub fn run_export(
             Err(e)
         }
     }
+}
+
+/// One frame of `media` at `at` seconds with the ASS subtitles `ass` drawn on, as PNG bytes about 960 pixels wide.
+pub fn preview_frame(ffmpeg: &Path, media: &Path, ass: &str, at: f64) -> Result<Vec<u8>, String> {
+    let dir = std::env::temp_dir().join(format!("vipr-preview-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot make a folder for the preview: {e}"))?;
+    fsio::write_atomic(&dir.join("preview.ass"), ass.as_bytes())
+        .map_err(|e| format!("cannot write the preview subtitles: {e}"))?;
+    let mut cmd = Command::new(ffmpeg);
+    // seeking before the input is fast, and -copyts keeps the original times the subtitles are matched against
+    cmd.current_dir(&dir)
+        .args(["-hide_banner", "-nostdin", "-v", "error", "-ss"])
+        .arg(format!("{at:.3}"))
+        .args(["-copyts", "-i"])
+        .arg(media)
+        .args(["-map", "0:v:0", "-vf", "subtitles=preview.ass,scale=960:-2"])
+        .args(["-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // no console window
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("could not start ffmpeg: {e}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if out.status.success() && !out.stdout.is_empty() {
+        return Ok(out.stdout);
+    }
+    let why = String::from_utf8_lossy(&out.stderr);
+    if why.contains("matches no streams") {
+        return Err("this recording has no picture to preview on.".into());
+    }
+    Err(format!(
+        "ffmpeg could not make the preview ({})",
+        engine::lang::clean_separators(why.lines().last().unwrap_or("no reason given").trim())
+    ))
 }
 
 fn run_ffmpeg(
