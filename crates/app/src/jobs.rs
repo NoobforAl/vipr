@@ -26,6 +26,7 @@ use engine::project::{
 use engine::registry::{Registry, Role};
 use engine::subalign::{align, best_offset};
 use engine::transcript::Transcript;
+use engine::translate::PromptStyle;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{button, column, container, row, text};
@@ -448,7 +449,8 @@ fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Models made only for translation each need a prompt format of their own, which isn't wired up.
+/// Models made only for translation, known by file name when the registry doesn't list them. None can
+/// clean up, find chapters or compare; for translation see [`translate_model`].
 const TRANSLATE_ONLY_FILES: [&str; 3] = ["translategemma", "hunyuan-mt", "seed-x"];
 
 /// The registry id of a model, or the reason it can't be used for this work.
@@ -463,11 +465,46 @@ fn model_id(model: &Path, registry: Option<&Registry>) -> Result<String, String>
         || TRANSLATE_ONLY_FILES.iter().any(|n| lower.contains(n))
     {
         return Err(format!(
-            "\"{file}\" is made only for translation and needs its own prompt format, which ViPr does \
-             not have yet. Choose a general AI model in Settings."
+            "\"{file}\" is made only for translation, so it can't do this. Choose a general AI model \
+             in Settings."
         ));
     }
     Ok(entry.map_or(file, |m| m.id.clone()))
+}
+
+/// The registry id of the model a translation runs on and how it is prompted, or why it can't
+/// translate. TranslateGemma has a fixed prompt of its own that ViPr knows; the other translation-only
+/// models (Hunyuan-MT, Seed-X) need formats it doesn't have yet.
+fn translate_model(
+    model: &Path,
+    registry: Option<&Registry>,
+) -> Result<(String, PromptStyle), String> {
+    let file = model
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let entry = registry.and_then(|r| r.models.iter().find(|m| m.file_name() == file));
+    let style = match entry {
+        Some(m) => m.prompt_style(),
+        None if file.to_lowercase().contains("translategemma") => Some(PromptStyle::TranslateGemma),
+        None => Some(PromptStyle::Chat),
+    };
+    let refused = || {
+        format!(
+            "\"{file}\" is made only for translation and needs a prompt format of its own, which ViPr \
+             doesn't have yet. Choose another translation model in Settings."
+        )
+    };
+    match style {
+        Some(PromptStyle::TranslateGemma) => Ok((
+            entry.map_or_else(|| file.clone(), |m| m.id.clone()),
+            PromptStyle::TranslateGemma,
+        )),
+        Some(PromptStyle::Chat) => model_id(model, registry)
+            .map(|id| (id, PromptStyle::Chat))
+            .map_err(|_| refused()),
+        None => Err(refused()),
+    }
 }
 
 /// Starts `llm-worker --mode <mode>` and turns its progress into events.
@@ -725,7 +762,7 @@ fn translate(
         .ok_or("no AI model is downloaded. Get one in Settings first.")?;
     let exe = pipeline::find_worker("llm-worker")
         .ok_or("the AI engine (llm-worker) was not found next to the app.")?;
-    let model_name = model_id(model, Registry::load_default(None).ok().as_ref())?;
+    let (model_name, style) = translate_model(model, Registry::load_default(None).ok().as_ref())?;
 
     let paths = &run.job.paths;
     let (cues, source_lang) = match source {
@@ -763,6 +800,9 @@ fn translate(
         "--checkpoint".to_string(),
         pipeline::s(&paths.checkpoint(target)),
     ]);
+    if style != PromptStyle::Chat {
+        extra.extend(["--prompt-style".to_string(), style.name().to_string()]);
+    }
     call_worker(
         "translate",
         &exe,
@@ -1330,11 +1370,21 @@ mod tests {
         let mut refused = 0;
         for m in &registry.models {
             let result = model_id(Path::new(&m.file_name()), Some(&registry));
+            let translating = translate_model(Path::new(&m.file_name()), Some(&registry));
             if m.has_role(Role::Llm) {
                 assert_eq!(result.as_deref(), Ok(m.id.as_str()));
+                assert_eq!(translating, Ok((m.id.clone(), PromptStyle::Chat)));
             } else if m.has_role(Role::Translate) {
                 refused += 1;
                 assert!(result.is_err(), "{}", m.id);
+                // of the translation-only models, only TranslateGemma's prompt format is known
+                let gemma = m.id.starts_with("translategemma");
+                assert_eq!(
+                    translating.ok().map(|(_, style)| style),
+                    gemma.then_some(PromptStyle::TranslateGemma),
+                    "{}",
+                    m.id
+                );
             }
         }
         assert!(refused >= 3, "the registry should list these models");
@@ -1346,6 +1396,11 @@ mod tests {
         ] {
             assert!(model_id(Path::new(name), None).is_err(), "{name}");
         }
+        assert_eq!(
+            translate_model(Path::new("TranslateGemma-4b.gguf"), None),
+            Ok(("TranslateGemma-4b.gguf".into(), PromptStyle::TranslateGemma))
+        );
+        assert!(translate_model(Path::new("Hunyuan-MT-7B-Q4.gguf"), None).is_err());
         assert_eq!(
             model_id(Path::new("C:/m/mine.gguf"), None).unwrap(),
             "mine.gguf"

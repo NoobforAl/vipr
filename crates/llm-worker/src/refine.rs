@@ -17,6 +17,12 @@ const CONTEXT_LINES: usize = 4;
 pub trait Chat {
     fn complete(&mut self, system: &str, user: &str, max_new_tokens: usize) -> Result<String>;
     fn count_tokens(&self, text: &str) -> usize;
+    /// A prompt already written in the model's own turn format, for models with a fixed prompt of their
+    /// own (`engine::translate::PromptStyle`). The model's chat template is not used.
+    fn complete_raw(&mut self, prompt: &str, max_new_tokens: usize) -> Result<String> {
+        let _ = (prompt, max_new_tokens);
+        anyhow::bail!("this model backend can't take a prompt in the model's own format")
+    }
 }
 
 // ---------------------------------------------------------------------------- data

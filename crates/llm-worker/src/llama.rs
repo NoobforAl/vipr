@@ -30,7 +30,8 @@ pub fn load_model(backend: &LlamaBackend, path: &Path, cpu_only: bool) -> Result
 pub struct LlamaChat<'m> {
     model: &'m LlamaModel,
     ctx: LlamaContext<'m>,
-    template: llama_cpp_2::model::LlamaChatTemplate,
+    /// `None` for a model without one, which can then only take [`Chat::complete_raw`].
+    template: Option<llama_cpp_2::model::LlamaChatTemplate>,
     n_ctx: u32,
 }
 
@@ -59,9 +60,7 @@ impl<'m> LlamaChat<'m> {
         let ctx = model
             .new_context(backend, params)
             .map_err(|e| anyhow!("creating llama context: {e}"))?;
-        let template = model
-            .chat_template(None)
-            .map_err(|e| anyhow!("the model has no chat template: {e}"))?;
+        let template = model.chat_template(None).ok();
         Ok(LlamaChat {
             model,
             ctx,
@@ -71,16 +70,9 @@ impl<'m> LlamaChat<'m> {
     }
 }
 
-impl Chat for LlamaChat<'_> {
-    fn complete(&mut self, system: &str, user: &str, max_new_tokens: usize) -> Result<String> {
-        let messages = vec![
-            LlamaChatMessage::new("system".into(), system.into())?,
-            LlamaChatMessage::new("user".into(), user.into())?,
-        ];
-        let prompt = self
-            .model
-            .apply_chat_template(&self.template, &messages, true)
-            .map_err(|e| anyhow!("chat template: {e}"))?;
+impl LlamaChat<'_> {
+    /// Greedy decoding of `prompt`, which is already in the model's turn format.
+    fn generate(&mut self, prompt: &str, max_new_tokens: usize) -> Result<String> {
         let vocab = self.model.vocab();
         let tokens = vocab.tokenize(prompt.as_bytes(), vocab.should_add_bos(), true);
         if tokens.is_empty() {
@@ -123,6 +115,28 @@ impl Chat for LlamaChat<'_> {
             sample_at = 0;
         }
         Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+}
+
+impl Chat for LlamaChat<'_> {
+    fn complete(&mut self, system: &str, user: &str, max_new_tokens: usize) -> Result<String> {
+        let messages = vec![
+            LlamaChatMessage::new("system".into(), system.into())?,
+            LlamaChatMessage::new("user".into(), user.into())?,
+        ];
+        let template = self
+            .template
+            .as_ref()
+            .ok_or_else(|| anyhow!("the model has no chat template"))?;
+        let prompt = self
+            .model
+            .apply_chat_template(template, &messages, true)
+            .map_err(|e| anyhow!("chat template: {e}"))?;
+        self.generate(&prompt, max_new_tokens)
+    }
+
+    fn complete_raw(&mut self, prompt: &str, max_new_tokens: usize) -> Result<String> {
+        self.generate(prompt, max_new_tokens)
     }
 
     fn count_tokens(&self, text: &str) -> usize {

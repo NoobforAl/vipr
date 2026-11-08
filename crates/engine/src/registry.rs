@@ -133,6 +133,10 @@ pub struct ModelEntry {
     /// The download needs a Hugging Face token (gated model).
     #[serde(default)]
     pub gated: bool,
+    /// A prompt format of its own, for models made for one task (`"translategemma"`). `None` = the
+    /// model's chat template with ViPr's own prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     #[serde(default)]
     pub notes: String,
 }
@@ -167,6 +171,11 @@ impl ModelEntry {
 
     pub fn has_role(&self, role: Role) -> bool {
         self.roles.contains(&role)
+    }
+
+    /// How the model is prompted. `None` for a prompt format ViPr doesn't know, so it can't be used.
+    pub fn prompt_style(&self) -> Option<crate::translate::PromptStyle> {
+        crate::translate::PromptStyle::from_name(self.prompt.as_deref().unwrap_or(""))
     }
 }
 

@@ -278,6 +278,7 @@ mod tests {
             backends: vec![Backend::Cpu],
             presets: vec![],
             gated: false,
+            prompt: None,
             notes: String::new(),
         }
     }

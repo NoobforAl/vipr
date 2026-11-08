@@ -64,6 +64,24 @@ impl<C: Chat> Chat for FitContext<C> {
     fn count_tokens(&self, text: &str) -> usize {
         self.chat.count_tokens(text)
     }
+
+    fn complete_raw(&mut self, prompt: &str, max_new_tokens: usize) -> Result<String> {
+        let tokens = self.chat.count_tokens(prompt) + 1;
+        if tokens + max_new_tokens > self.n_ctx {
+            let message = format!(
+                "a prompt of about {tokens} tokens and a reply of up to {max_new_tokens} don't fit                  the context of {}",
+                self.n_ctx
+            );
+            return Err(BadReply(message).into());
+        }
+        self.chat.complete_raw(prompt, max_new_tokens).map_err(|e| {
+            if e.to_string().contains("does not fit") {
+                BadReply(e.to_string()).into()
+            } else {
+                e
+            }
+        })
+    }
 }
 
 /// Runs `call` on chunks of `items`. On failure a chunk is split in half, then a single item gets one

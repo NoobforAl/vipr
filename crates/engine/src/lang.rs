@@ -166,6 +166,104 @@ fn primary_subtag(code: &str) -> &str {
     code.split('-').next().unwrap_or(code)
 }
 
+/// Language names in TranslateGemma's own prompt, by code: the entries of its chat template for the
+/// languages in [`LANGUAGES`]. The template accepts no other code.
+const TRANSLATEGEMMA_NAMES: &[(&str, &str)] = &[
+    ("af", "Afrikaans"),
+    ("sq", "Albanian"),
+    ("am", "Amharic"),
+    ("ar", "Arabic"),
+    ("hy", "Armenian"),
+    ("az", "Azerbaijani"),
+    ("eu", "Basque"),
+    ("be", "Belarusian"),
+    ("bn", "Bengali"),
+    ("bs", "Bosnian"),
+    ("bg", "Bulgarian"),
+    ("my", "Burmese"),
+    ("ca", "Catalan"),
+    ("zh-Hans", "Chinese"),
+    ("zh-Hant", "Chinese"),
+    ("hr", "Croatian"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("dv", "Divehi"),
+    ("nl", "Dutch"),
+    ("en", "English"),
+    ("et", "Estonian"),
+    ("fi", "Finnish"),
+    ("fr", "French"),
+    ("gl", "Galician"),
+    ("ka", "Georgian"),
+    ("de", "German"),
+    ("el", "Greek"),
+    ("gu", "Gujarati"),
+    ("he", "Hebrew"),
+    ("hi", "Hindi"),
+    ("hu", "Hungarian"),
+    ("is", "Icelandic"),
+    ("id", "Indonesian"),
+    ("ga", "Irish"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("kn", "Kannada"),
+    ("kk", "Kazakh"),
+    ("km", "Central Khmer"),
+    ("ko", "Korean"),
+    ("ky", "Kyrgyz"),
+    ("lo", "Lao"),
+    ("lv", "Latvian"),
+    ("lt", "Lithuanian"),
+    ("mk", "Macedonian"),
+    ("ms", "Malay"),
+    ("ml", "Malayalam"),
+    ("mt", "Maltese"),
+    ("mr", "Marathi"),
+    ("mn", "Mongolian"),
+    ("ne", "Nepali"),
+    ("no", "Norwegian"),
+    ("ps", "Pashto"),
+    ("fa", "Persian"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("pa", "Punjabi"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("sr", "Serbian"),
+    ("sd", "Sindhi"),
+    ("si", "Sinhala"),
+    ("sk", "Slovak"),
+    ("sl", "Slovenian"),
+    ("es", "Spanish"),
+    ("sw", "Swahili"),
+    ("sv", "Swedish"),
+    ("tg", "Tajik"),
+    ("ta", "Tamil"),
+    ("te", "Telugu"),
+    ("th", "Thai"),
+    ("tr", "Turkish"),
+    ("uk", "Ukrainian"),
+    ("ur", "Urdu"),
+    ("ug", "Uyghur"),
+    ("uz", "Uzbek"),
+    ("vi", "Vietnamese"),
+    ("cy", "Welsh"),
+    ("yi", "Yiddish"),
+];
+
+/// The code and name TranslateGemma's prompt uses for `code`, if the model knows the language. A
+/// regional code falls back to its language, as in [`language`].
+pub fn translategemma_name(code: &str) -> Option<(&'static str, &'static str)> {
+    let code = code.trim().replace('_', "-");
+    let find = |c: &str| {
+        TRANSLATEGEMMA_NAMES
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(c))
+            .copied()
+    };
+    find(&code).or_else(|| find(code.split('-').next()?))
+}
+
 /// Scripts a correct translation into `code` may be written in. Empty when unknown, which turns the
 /// wrong-script guard off.
 pub fn expected_scripts(code: &str) -> &'static [Script] {
@@ -311,6 +409,21 @@ pub fn clean_separators(text: &str) -> String {
 mod tests {
     use super::*;
     use unicode_bidi::BidiInfo;
+
+    #[test]
+    fn translategemma_knows_most_targets_by_its_own_names() {
+        assert_eq!(translategemma_name("de"), Some(("de", "German")));
+        assert_eq!(translategemma_name("EN_gb"), Some(("en", "English")));
+        assert_eq!(translategemma_name("zh-Hant"), Some(("zh-Hant", "Chinese")));
+        assert_eq!(translategemma_name("km"), Some(("km", "Central Khmer")));
+        assert_eq!(translategemma_name("fil"), None);
+        assert_eq!(translategemma_name(""), None);
+        let known = LANGUAGES
+            .iter()
+            .filter(|l| translategemma_name(l.code).is_some())
+            .count();
+        assert_eq!(known, LANGUAGES.len() - 2, "all but Filipino and Sorani");
+    }
 
     /// What cosmic-text uses for the line's base direction (shape.rs: `bidi.paragraphs[0]`).
     fn shaper_rtl(text: &str) -> bool {

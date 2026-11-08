@@ -31,6 +31,7 @@ use engine::project::ProjectPaths;
 use engine::registry::{Fit, ModelEntry, Preset, Registry, Role, fit};
 use engine::settings::Settings;
 use engine::transcript::{Transcript, clock};
+use engine::translate::PromptStyle;
 use gpu_detect::Detection;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
@@ -351,10 +352,15 @@ fn row_content(line: &str) -> text_editor::Content {
 }
 
 /// The languages a transcript can be translated to. Not its own: that would fail in the worker.
-fn translate_options(source: Option<&str>) -> Vec<LanguageChoice> {
+/// The languages a transcript in `source` can be translated into, by a model prompted in `style`.
+fn translate_options(source: Option<&str>, style: PromptStyle) -> Vec<LanguageChoice> {
     LANGUAGES
         .iter()
         .filter(|l| Some(l.code) != source)
+        .filter(|l| {
+            style != PromptStyle::TranslateGemma
+                || engine::lang::translategemma_name(l.code).is_some()
+        })
         .map(LanguageChoice)
         .collect()
 }
@@ -517,7 +523,7 @@ struct App {
     viewing: Option<usize>,
     /// What the translate box searches, and the transcript language it was made for. See [`App::sync_translate_box`].
     translate_box: combo_box::State<LanguageChoice>,
-    translate_box_source: Option<Option<&'static str>>,
+    translate_box_source: Option<(Option<&'static str>, PromptStyle)>,
     /// True from pressing Start until the user goes anywhere else: the player may open by itself.
     auto_open: bool,
     /// ffmpeg download in progress, or the last error
@@ -686,6 +692,15 @@ impl App {
         self.model_path(translate_role(
             self.selection.contains_key(&Role::Translate),
         ))
+    }
+
+    /// How the translation model is prompted, which limits the languages it is offered for.
+    fn translate_style(&self) -> PromptStyle {
+        self.entry(translate_role(
+            self.selection.contains_key(&Role::Translate),
+        ))
+        .and_then(ModelEntry::prompt_style)
+        .unwrap_or_default()
     }
 
     fn selected_entries(&self) -> Vec<&ModelEntry> {
@@ -1547,8 +1562,8 @@ impl App {
                 Task::none()
             }
             Message::TranslateBoxClosed => {
-                let source = self.translate_box_source.flatten();
-                self.translate_box = combo_box::State::new(translate_options(source));
+                let (source, style) = self.translate_box_source.unwrap_or_default();
+                self.translate_box = combo_box::State::new(translate_options(source, style));
                 Task::none()
             }
             Message::Translate(job) => {
@@ -1956,9 +1971,10 @@ impl App {
             .and_then(|j| j.transcript.as_ref())
             .and_then(|tr| engine::lang::language(&tr.language))
             .map(|l| l.code);
-        if self.translate_box_source != Some(source) {
-            self.translate_box_source = Some(source);
-            self.translate_box = combo_box::State::new(translate_options(source));
+        let style = self.translate_style();
+        if self.translate_box_source != Some((source, style)) {
+            self.translate_box_source = Some((source, style));
+            self.translate_box = combo_box::State::new(translate_options(source, style));
         }
     }
 
@@ -3915,10 +3931,12 @@ fn is_audio_file(path: &std::path::Path) -> bool {
         .is_some_and(|e| AUDIO.contains(&e.to_lowercase().as_str()))
 }
 
-/// Models tagged for translation only each need a prompt format of their own, which isn't wired up
-/// (`jobs::model_id` refuses them), so they aren't offered.
+/// General models, and models made only for translation whose own prompt format ViPr has
+/// (TranslateGemma). Others, such as Hunyuan-MT, aren't offered (`jobs::translate_model` refuses them).
 fn can_translate(model: &ModelEntry) -> bool {
-    model.has_role(Role::Translate) && model.has_role(Role::Llm)
+    model.has_role(Role::Translate)
+        && (model.has_role(Role::Llm)
+            || model.prompt_style().is_some_and(|s| s != PromptStyle::Chat))
 }
 
 /// Whose model a translation runs on.
@@ -4354,10 +4372,12 @@ fn download_stream(
 
 #[cfg(test)]
 mod tests {
+    use engine::translate::PromptStyle;
+
     #[test]
     fn typed_letters_find_languages_anywhere_in_their_name() {
         let found = |query: &str| -> Vec<String> {
-            super::translate_options(None)
+            super::translate_options(None, PromptStyle::Chat)
                 .iter()
                 .map(ToString::to_string)
                 .filter(|name| name.to_lowercase().contains(query))
@@ -4374,7 +4394,7 @@ mod tests {
     #[test]
     fn a_transcript_is_not_offered_its_own_language() {
         let names = |source| -> Vec<&str> {
-            super::translate_options(source)
+            super::translate_options(source, PromptStyle::Chat)
                 .iter()
                 .map(|l| l.0.code)
                 .collect()
@@ -4382,6 +4402,26 @@ mod tests {
         assert!(names(None).contains(&"en"));
         assert!(!names(Some("en")).contains(&"en"));
         assert_eq!(names(Some("en")).len() + 1, names(None).len());
+    }
+
+    #[test]
+    fn translategemma_is_offered_only_the_languages_it_knows() {
+        let gemma = super::translate_options(Some("en"), PromptStyle::TranslateGemma);
+        let codes: Vec<&str> = gemma.iter().map(|l| l.0.code).collect();
+        assert!(codes.contains(&"de") && codes.contains(&"fa"));
+        assert!(!codes.contains(&"fil") && !codes.contains(&"en"));
+    }
+
+    #[test]
+    fn translategemma_can_be_chosen_for_translation_but_hunyuan_cannot() {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models.json");
+        let registry = engine::registry::Registry::load_default(Some(&file)).unwrap();
+        let can = |id: &str| super::can_translate(registry.get(id).unwrap());
+        assert!(can("translategemma-4b-it-q4_k_m"));
+        assert!(can("translategemma-12b-it-q4_k_m"));
+        assert!(can("qwen3-4b-instruct-2507-q4_k_m"));
+        assert!(!can("hunyuan-mt-7b-q4_k_m"));
+        assert!(!can("whisper-large-v3-turbo"));
     }
 
     #[test]

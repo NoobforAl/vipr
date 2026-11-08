@@ -19,6 +19,7 @@ use engine::project::{
 use engine::sanitize::sanitize_untrusted;
 use engine::translate::{
     self as guards, CONTEXT_AFTER, CONTEXT_BEFORE, Context, MAX_CHUNK_CUES, MAX_REJECTED_SHARE,
+    PromptStyle,
 };
 
 use crate::batch::{self, BadReply};
@@ -93,9 +94,27 @@ pub fn translate(
     checkpoint: Option<&Path>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<TranslateOutput> {
+    translate_with(chat, input, PromptStyle::Chat, checkpoint, progress)
+}
+
+/// [`translate`] for a model prompted in `style`. A model with a fixed prompt of its own
+/// ([`PromptStyle::TranslateGemma`]) gets one sentence group per call and no context, glossary or
+/// background, as its prompt has no place for them; the guards and the checkpoint work the same.
+pub fn translate_with(
+    chat: &mut dyn Chat,
+    input: &TranslateInput,
+    style: PromptStyle,
+    checkpoint: Option<&Path>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<TranslateOutput> {
     let started = Instant::now();
     if !input.source_lang.is_empty() && input.source_lang.eq_ignore_ascii_case(&input.target) {
         bail!("the cues are already in {}", input.target);
+    }
+    if style == PromptStyle::TranslateGemma {
+        // before any model call, so a language the model doesn't know is one clear error
+        guards::translategemma_prompt(&input.source_lang, &input.target, "")
+            .map_err(anyhow::Error::msg)?;
     }
     let mut seen = HashSet::new();
     if let Some(cue) = input.cues.iter().find(|c| !seen.insert(c.id)) {
@@ -159,13 +178,18 @@ pub fn translate(
     let mut driver = Driver {
         chat,
         input,
+        style,
         groups: &groups,
         results,
     };
     let mut finished_cues = already_done;
+    let max_chunk = match style {
+        PromptStyle::Chat => MAX_CHUNK_CUES,
+        PromptStyle::TranslateGemma => 1,
+    };
     let finished = batch::run_weighted_chunks(
         &pending,
-        MAX_CHUNK_CUES,
+        max_chunk,
         |g: &usize| groups[*g].range.len(),
         |chunk: &[usize], strict| driver.call(chunk, strict),
         |g: &usize| {
@@ -229,6 +253,7 @@ fn untranslated(cue: &TimedText) -> TranslationCue {
 struct Driver<'a> {
     chat: &'a mut dyn Chat,
     input: &'a TranslateInput,
+    style: PromptStyle,
     groups: &'a [Group],
     /// By input position. Fills up as chunks finish, which is where the context comes from.
     results: Vec<Option<TranslationCue>>,
@@ -264,6 +289,12 @@ impl Driver<'_> {
         let (Some(first), Some(last)) = (chunk.first().copied(), chunk.last().copied()) else {
             return Ok(Vec::new());
         };
+        if self.style == PromptStyle::TranslateGemma {
+            return chunk
+                .iter()
+                .map(|g| self.ask_translategemma(*g, first))
+                .collect();
+        }
         let chat = &*self.chat;
         let fits = |text: &str| chat.count_tokens(text) <= MAX_CONTEXT_LINE_TOKENS;
         let before: Vec<(String, String)> = (first.saturating_sub(CONTEXT_BEFORE)..first)
@@ -315,6 +346,20 @@ impl Driver<'_> {
         Ok(checked)
     }
 
+    /// One TranslateGemma call for group `g`: its fixed prompt, and the whole reply is the translation.
+    fn ask_translategemma(&mut self, g: usize, first: usize) -> Result<Checked> {
+        let unit = &self.groups[g].unit;
+        let prompt =
+            guards::translategemma_prompt(&self.input.source_lang, &self.input.target, &unit.text)
+                .map_err(anyhow::Error::msg)?;
+        let cap = guards::token_cap(self.chat.count_tokens(&unit.text), 1);
+        let reply = self.chat.complete_raw(&prompt, cap)?;
+        // a long text may come back over several lines
+        let reply = reply.split_whitespace().collect::<Vec<_>>().join(" ");
+        let previous = first.checked_sub(1).and_then(|p| self.finished_pair(p));
+        Ok(self.check(unit, &reply, previous.as_ref()))
+    }
+
     fn check(&self, unit: &TimedText, reply: &str, previous: Option<&(String, String)>) -> Checked {
         let glossary = &self.input.glossary;
         // The mark goes back on by itself, and the model may have kept or invented one.
@@ -337,6 +382,9 @@ impl Driver<'_> {
 
     /// One strict retry of a single group.
     fn retry(&mut self, g: usize) -> Option<Line> {
+        if self.style == PromptStyle::TranslateGemma {
+            return None; // a fixed prompt and greedy decoding would give the same answer again
+        }
         self.ask(&[g], true)
             .ok()
             .and_then(|mut retry| retry.pop()?.ok())
@@ -426,6 +474,62 @@ mod tests {
         fn count_tokens(&self, text: &str) -> usize {
             text.split_whitespace().count()
         }
+        fn complete_raw(&mut self, prompt: &str, max: usize) -> Result<String> {
+            self.asked.push(("<raw>".into(), prompt.into(), max));
+            (self.answer)(prompt)
+        }
+    }
+
+    #[test]
+    fn translategemma_gets_its_own_prompt_one_sentence_per_call() {
+        let mut chat = mock(|prompt: &str| {
+            assert!(prompt.starts_with(
+                "<start_of_turn>user
+You are a professional English (en) to Persian (fa)"
+            ));
+            Ok(if prompt.contains("Hello there.") {
+                "سلام به همه.
+"
+                .into()
+            } else {
+                "حال شما چطور است؟".into()
+            })
+        });
+        let cues = vec![cue(1, "Hello there."), cue(2, "How are you?")];
+        let out = translate_with(
+            &mut chat,
+            &input(cues),
+            PromptStyle::TranslateGemma,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(chat.asked.len(), 2, "one call per sentence");
+        assert!(
+            chat.asked.iter().all(|(how, _, _)| how == "<raw>"),
+            "never the chat template"
+        );
+        assert!(chat.asked[1].1.contains("How are you?") && !chat.asked[1].1.contains("Hello"));
+        let texts: Vec<&str> = out.cues.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["سلام به همه.", "حال شما چطور است؟"]);
+        assert!(out.cues.iter().all(|c| c.status == CueStatus::Translated));
+    }
+
+    #[test]
+    fn translategemma_refuses_a_language_it_lacks_before_any_call() {
+        let mut chat = mock(|_: &str| Ok("x".into()));
+        let mut job = input(vec![cue(1, "Hello there.")]);
+        job.target = "fil".into();
+        let err = translate_with(
+            &mut chat,
+            &job,
+            PromptStyle::TranslateGemma,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Filipino"), "{err}");
+        assert!(chat.asked.is_empty());
     }
 
     fn mock<F: FnMut(&str) -> Result<String>>(answer: F) -> Mock<F> {

@@ -37,13 +37,14 @@ use engine::project::{
 };
 use engine::prompts;
 use engine::sanitize::sanitize_untrusted;
+use engine::translate::PromptStyle;
 use llm_worker::batch::FitContext;
 use llm_worker::chapters::chapters;
 use llm_worker::checkpoint::Checkpoint;
 use llm_worker::compare::compare;
 use llm_worker::llama::{LlamaChat, init_backend, load_model};
 use llm_worker::refine::{DEFAULT_CHUNK_LINES, InUtterance, Input, Refiner};
-use llm_worker::translate::translate;
+use llm_worker::translate::translate_with;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -99,6 +100,14 @@ struct Args {
     kv_f16: bool,
     #[arg(long, default_value_t = 4)]
     threads: i32,
+    /// Translate only: `chat` (the model's chat template) or `translategemma` (Google's TranslateGemma,
+    /// which has a fixed prompt of its own)
+    #[arg(long, default_value = "chat", value_parser = parse_prompt_style)]
+    prompt_style: PromptStyle,
+}
+
+fn parse_prompt_style(name: &str) -> Result<PromptStyle, String> {
+    PromptStyle::from_name(name).ok_or_else(|| format!("unknown prompt style \"{name}\""))
 }
 
 fn event(v: serde_json::Value) {
@@ -215,9 +224,10 @@ fn run_translate(args: &Args) -> Result<()> {
     let mut chat = FitContext::new(chat, args.ctx as usize);
     event(json!({"event": "model_loaded", "seconds": t.elapsed().as_secs_f64()}));
 
-    let output = translate(
+    let output = translate_with(
         &mut chat,
         &input,
+        args.prompt_style,
         args.checkpoint.as_deref(),
         &mut percent_events(),
     )?;
@@ -413,6 +423,15 @@ mod tests {
     fn mode_defaults_to_refine() {
         assert_eq!(args(&[]).mode, Mode::Refine);
         assert_eq!(args(&["--mode", "refine"]).mode, Mode::Refine);
+    }
+
+    #[test]
+    fn prompt_style_defaults_to_the_chat_template() {
+        assert_eq!(args(&[]).prompt_style, PromptStyle::Chat);
+        let style = args(&["--prompt-style", "translategemma"]).prompt_style;
+        assert_eq!(style, PromptStyle::TranslateGemma);
+        let base = ["llm-worker", "--model", "m", "--input", "i", "--out", "o"];
+        assert!(Args::try_parse_from(base.iter().chain(&["--prompt-style", "nope"])).is_err());
     }
 
     fn temp_dir(name: &str) -> PathBuf {

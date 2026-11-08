@@ -347,7 +347,8 @@
       "min_vram_mb": 3400,
       "backends": ["cuda", "vulkan", "metal", "cpu"],
       "presets": ["balanced"],
-      "notes": "Google's Gemma 3 fine-tuned only for translation (about 55 languages). Third-party GGUF conversion of google/translategemma-4b-it. Needs its own prompt format: not wired up before translation ships."
+      "prompt": "translategemma",
+      "notes": "Google's Gemma 3 fine-tuned only for translation (about 55 languages), https://huggingface.co/google/translategemma-4b-it, as a third-party GGUF conversion (Google's own files are not GGUF and need a Hugging Face login). Uses its own prompt, one sentence at a time, so it ignores the glossary and the profile's background. Translation only: it can't clean up text."
     },
     {
       "id": "translategemma-4b-it-q8_0",
@@ -362,7 +363,8 @@
       "min_vram_mb": 5000,
       "backends": ["cuda", "vulkan", "metal", "cpu"],
       "presets": [],
-      "notes": "Higher-quality version of the 4B translation model."
+      "prompt": "translategemma",
+      "notes": "Higher-quality version of the 4B translation model (google/translategemma-4b-it). Same limits: translation only, no glossary or background."
     },
     {
       "id": "translategemma-12b-it-q4_k_m",
@@ -377,7 +379,8 @@
       "min_vram_mb": 8600,
       "backends": ["cuda", "vulkan", "metal", "cpu"],
       "presets": ["best"],
-      "notes": "Best quality translation option here; needs a 10 GB GPU or a fast CPU with plenty of RAM."
+      "prompt": "translategemma",
+      "notes": "Best quality translation option here (google/translategemma-12b-it); needs a 10 GB GPU or a fast CPU with plenty of RAM. Translation only, no glossary or background."
     },
     {
       "id": "hunyuan-mt-7b-q4_k_m",
