@@ -9,7 +9,8 @@
 //! - everything that can be rebuilt (transcripts, translations, cuts) stays in each recording's result
 //!   folder (`project::ProjectPaths`), under the user's output folder;
 //! - autosaved copies go to `<file>.backups/` (the last [`KEEP_BACKUPS`]), apart from the user's own
-//!   Save, and the change log to `<file>.history.jsonl` (`history`).
+//!   Save, and the change log to `<file>.history.jsonl` (`history`);
+//! - a project nobody has saved yet lives in its own folder under [`temporary_root`], per user.
 //!
 //! Not to be confused with `project.rs`, which is the sidecar format of one recording's result folder.
 
@@ -396,9 +397,14 @@ pub fn new_temporary(root: &Path) -> PathBuf {
         .join(format!("untitled.{EXTENSION}"))
 }
 
-/// The default `root` for [`new_temporary`]: `<system temp>/vipr`.
+/// The default `root` for [`new_temporary`]: `<per-user data dir>/ViPr/unsaved`
+/// (`%LOCALAPPDATA%\ViPr\unsaved`). Not the system temp folder: on Linux and macOS that is shared
+/// between users, and another user could plant a project there for ViPr to offer as "restore".
 pub fn temporary_root() -> PathBuf {
-    std::env::temp_dir().join("vipr")
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(crate::APP_DIR_NAME)
+        .join("unsaved")
 }
 
 /// Temporary projects under `root` that hold at least one clip, newest first: what can be restored
